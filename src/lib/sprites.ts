@@ -3,6 +3,9 @@ export const FACTORIO_MAX_SIZE = 8192
 export type Align = 'start' | 'center' | 'end'
 export type CellMode = 'auto' | 'square' | 'custom'
 export type FillOrder = 'row' | 'column'
+export type ExportMode = 'single' | 'split'
+/** Which axis holds one complete animation (one turret angle). */
+export type SplitAxis = 'row' | 'column'
 
 export type Sprite = {
   id: string
@@ -322,14 +325,225 @@ export function luaSnippet(filename: string, layout: SheetLayout): string {
 }`
 }
 
+export type SplitSheet = {
+  index: number
+  filename: string
+  groups: number
+  columns: number
+  rows: number
+  sheetWidth: number
+  sheetHeight: number
+  frameCount: number
+  startGroup: number
+  exceedsLimit: boolean
+}
+
+export type SplitPlan = {
+  axis: SplitAxis
+  animationLength: number
+  directionCount: number
+  leftoverFrames: number
+  groupsPerSheet: number
+  maxGroupsThatFit: number
+  sheetCount: number
+  cellWidth: number
+  cellHeight: number
+  animationFits: boolean
+  sheets: SplitSheet[]
+}
+
+export type SplitOptions = {
+  axis: SplitAxis
+  animationLength: number
+  /** Null packs as many complete animations as the 8192px limit allows. */
+  customGroupsPerSheet: number | null
+  filename: string
+}
+
+export function pngBasename(filename: string): string {
+  const trimmed = filename.trim() || 'spritesheet.png'
+  return trimmed.toLowerCase().endsWith('.png') ? trimmed.slice(0, -4) : trimmed
+}
+
+function lastNumberInName(name: string): { start: number; digits: string } | null {
+  const match = name.match(/(\d+)(?!.*\d)/)
+  if (!match || match.index === undefined) return null
+  return { start: match.index, digits: match[1] }
+}
+
+export function splitSheetFilename(filename: string, index: number): string {
+  const base = pngBasename(filename) || 'spritesheet'
+  const found = lastNumberInName(base)
+  if (!found) return `${base}-${index + 1}.png`
+
+  const next = String(Number(found.digits) + index).padStart(found.digits.length, '0')
+  return `${base.slice(0, found.start)}${next}${base.slice(found.start + found.digits.length)}.png`
+}
+
+export function zipFilename(filename: string): string {
+  const base = pngBasename(filename) || 'spritesheet'
+  const found = lastNumberInName(base)
+  if (!found) return `${base}.zip`
+  const stem = base.slice(0, found.start).replace(/[-_]+$/, '')
+  return `${stem || base}.zip`
+}
+
+function cellSizeFromSprites(sprites: Sprite[], options: LayoutOptions): {
+  cellWidth: number
+  cellHeight: number
+} {
+  const sized = computeLayout(sprites, {
+    ...options,
+    compact: true,
+    columns: 1,
+    rows: 1,
+  })
+  return { cellWidth: sized.cellWidth, cellHeight: sized.cellHeight }
+}
+
+export function maxCompleteGroups(
+  axis: SplitAxis,
+  animationLength: number,
+  cellWidth: number,
+  cellHeight: number,
+): number {
+  const length = positiveInt(animationLength)
+  const cellW = Math.max(1, cellWidth)
+  const cellH = Math.max(1, cellHeight)
+
+  if (axis === 'row') {
+    if (length * cellW > FACTORIO_MAX_SIZE || cellH > FACTORIO_MAX_SIZE) return 0
+    return Math.floor(FACTORIO_MAX_SIZE / cellH)
+  }
+
+  if (length * cellH > FACTORIO_MAX_SIZE || cellW > FACTORIO_MAX_SIZE) return 0
+  return Math.floor(FACTORIO_MAX_SIZE / cellW)
+}
+
+export function planSplitSheets(
+  sprites: Sprite[],
+  layoutOptions: LayoutOptions,
+  split: SplitOptions,
+): SplitPlan {
+  const { cellWidth, cellHeight } = cellSizeFromSprites(sprites, layoutOptions)
+  const animationLength = positiveInt(split.animationLength)
+  const directionCount = Math.floor(sprites.length / animationLength)
+  const leftoverFrames = sprites.length % animationLength
+  const maxGroupsThatFit = maxCompleteGroups(split.axis, animationLength, cellWidth, cellHeight)
+  const animationFits = maxGroupsThatFit > 0 && directionCount > 0
+  const groupsPerSheet = animationFits
+    ? Math.min(
+        maxGroupsThatFit,
+        directionCount,
+        split.customGroupsPerSheet == null
+          ? maxGroupsThatFit
+          : positiveInt(split.customGroupsPerSheet),
+      )
+    : 0
+
+  const sheets: SplitSheet[] = []
+  if (groupsPerSheet > 0) {
+    for (let startGroup = 0, index = 0; startGroup < directionCount; startGroup += groupsPerSheet, index++) {
+      const groups = Math.min(groupsPerSheet, directionCount - startGroup)
+      const columns = split.axis === 'row' ? animationLength : groups
+      const rows = split.axis === 'row' ? groups : animationLength
+      const sheetWidth = columns * cellWidth
+      const sheetHeight = rows * cellHeight
+      sheets.push({
+        index,
+        filename: splitSheetFilename(split.filename, index),
+        groups,
+        columns,
+        rows,
+        sheetWidth,
+        sheetHeight,
+        frameCount: groups * animationLength,
+        startGroup,
+        exceedsLimit: sheetWidth > FACTORIO_MAX_SIZE || sheetHeight > FACTORIO_MAX_SIZE,
+      })
+    }
+  }
+
+  return {
+    axis: split.axis,
+    animationLength,
+    directionCount,
+    leftoverFrames,
+    groupsPerSheet,
+    maxGroupsThatFit,
+    sheetCount: sheets.length,
+    cellWidth,
+    cellHeight,
+    animationFits,
+    sheets,
+  }
+}
+
+export function spritesForSplitSheet(sprites: Sprite[], plan: SplitPlan, sheetIndex: number): Sprite[] {
+  const sheet = plan.sheets[sheetIndex]
+  if (!sheet) return []
+  const start = sheet.startGroup * plan.animationLength
+  return sprites.slice(start, start + sheet.frameCount)
+}
+
+export function splitLayoutOptions(
+  options: LayoutOptions,
+  plan: SplitPlan,
+  sheet: SplitSheet,
+): LayoutOptions {
+  return {
+    ...options,
+    compact: false,
+    fillOrder: plan.axis,
+    columns: sheet.columns,
+    rows: sheet.rows,
+  }
+}
+
+export function luaStripesSnippet(plan: SplitPlan): string {
+  const stripes = plan.sheets
+    .map(
+      (sheet) => `    {
+      filename = "${sheet.filename}",
+      width_in_frames = ${sheet.columns},
+      height_in_frames = ${sheet.rows},
+    }`,
+    )
+    .join(',\n')
+
+  return `{
+  width = ${plan.cellWidth},
+  height = ${plan.cellHeight},
+  frame_count = ${plan.animationLength},
+  direction_count = ${plan.directionCount},
+  stripes = {
+${stripes}
+  },
+}`
+}
+
+export function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) reject(new Error('Could not encode PNG'))
+      else resolve(blob)
+    }, 'image/png')
+  })
+}
+
+export function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
 export function downloadCanvas(canvas: HTMLCanvasElement, filename: string): void {
-  canvas.toBlob((blob) => {
-    if (!blob) return
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = filename.endsWith('.png') ? filename : `${filename}.png`
-    link.click()
-    URL.revokeObjectURL(url)
-  }, 'image/png')
+  void canvasToPngBlob(canvas)
+    .then((blob) => downloadBlob(blob, filename.endsWith('.png') ? filename : `${filename}.png`))
+    .catch(() => {
+      /* encoding failed; nothing to download */
+    })
 }
