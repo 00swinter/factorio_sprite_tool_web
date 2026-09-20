@@ -2,6 +2,7 @@ export const FACTORIO_MAX_SIZE = 8192
 
 export type Align = 'start' | 'center' | 'end'
 export type CellMode = 'auto' | 'square' | 'custom'
+export type FillOrder = 'row' | 'column'
 
 export type Sprite = {
   id: string
@@ -15,6 +16,8 @@ export type Sprite = {
 export type LayoutOptions = {
   columns: number
   rows: number
+  compact: boolean
+  fillOrder: FillOrder
   cellMode: CellMode
   customWidth: number
   customHeight: number
@@ -156,11 +159,37 @@ function positiveInt(value: number, fallback = 1): number {
   return Number.isFinite(n) && n >= 1 ? n : fallback
 }
 
+export function compactGrid(
+  frameCount: number,
+  cellWidth = 1,
+  cellHeight = 1,
+): { columns: number; rows: number } {
+  const n = Math.max(0, frameCount)
+  if (n <= 1) return { columns: 1, rows: 1 }
+
+  const cellW = Math.max(1, cellWidth)
+  const cellH = Math.max(1, cellHeight)
+  let columns = n
+  let rows = 1
+  let best = Number.POSITIVE_INFINITY
+
+  for (let cols = 1; cols <= n; cols++) {
+    const nextRows = Math.ceil(n / cols)
+    const diff = Math.abs(cols * cellW - nextRows * cellH)
+    const empty = cols * nextRows - n
+    const score = diff * 1000 + empty
+    if (score <= best) {
+      best = score
+      columns = cols
+      rows = nextRows
+    }
+  }
+
+  return { columns, rows }
+}
+
 export function computeLayout(sprites: Sprite[], options: LayoutOptions): SheetLayout {
   const frameCount = sprites.length
-  const columns = positiveInt(options.columns)
-  const neededRows = Math.max(1, Math.ceil(frameCount / columns) || 1)
-  const rows = Math.max(positiveInt(options.rows), neededRows)
   const scale = Number.isFinite(options.scale) && options.scale > 0 ? options.scale : 1
 
   const nativeMaxWidth = sprites.reduce((max, sprite) => Math.max(max, sprite.width), 0)
@@ -180,8 +209,24 @@ export function computeLayout(sprites: Sprite[], options: LayoutOptions): SheetL
     cellWidth = size
     cellHeight = size
   } else {
-    cellWidth = Math.max(1, Math.round(nativeMaxWidth * scale))
-    cellHeight = Math.max(1, Math.round(nativeMaxHeight * scale))
+    cellWidth = Math.max(1, Math.round(nativeMaxWidth * scale) || 1)
+    cellHeight = Math.max(1, Math.round(nativeMaxHeight * scale) || 1)
+  }
+
+  let columns: number
+  let rows: number
+  if (options.compact) {
+    const packed = compactGrid(frameCount, cellWidth, cellHeight)
+    columns = packed.columns
+    rows = packed.rows
+  } else if (options.fillOrder === 'column') {
+    rows = positiveInt(options.rows)
+    const neededCols = Math.max(1, Math.ceil(frameCount / rows) || 1)
+    columns = Math.max(positiveInt(options.columns), neededCols)
+  } else {
+    columns = positiveInt(options.columns)
+    const neededRows = Math.max(1, Math.ceil(frameCount / columns) || 1)
+    rows = Math.max(positiveInt(options.rows), neededRows)
   }
 
   const sheetWidth = columns * cellWidth
@@ -200,6 +245,34 @@ export function computeLayout(sprites: Sprite[], options: LayoutOptions): SheetL
     exceedsLimit: sheetWidth > FACTORIO_MAX_SIZE || sheetHeight > FACTORIO_MAX_SIZE,
     mixedSizes,
   }
+}
+
+export function cellIndexToPos(
+  index: number,
+  layout: SheetLayout,
+  order: FillOrder,
+): { col: number; row: number } {
+  if (order === 'column') {
+    return {
+      col: Math.floor(index / layout.rows),
+      row: index % layout.rows,
+    }
+  }
+  return {
+    col: index % layout.columns,
+    row: Math.floor(index / layout.columns),
+  }
+}
+
+export function posToFrameIndex(
+  col: number,
+  row: number,
+  layout: SheetLayout,
+  order: FillOrder,
+): number | null {
+  const index = order === 'column' ? col * layout.rows + row : row * layout.columns + col
+  if (index < 0 || index >= layout.frameCount) return null
+  return index
 }
 
 export function renderSpritesheet(
@@ -221,8 +294,7 @@ export function renderSpritesheet(
   const scale = Number.isFinite(options.scale) && options.scale > 0 ? options.scale : 1
 
   sprites.forEach((sprite, index) => {
-    const col = index % layout.columns
-    const row = Math.floor(index / layout.columns)
+    const { col, row } = cellIndexToPos(index, layout, options.fillOrder)
     const cellX = col * layout.cellWidth
     const cellY = row * layout.cellHeight
     const drawWidth = Math.max(1, Math.round(sprite.width * scale))

@@ -6,11 +6,14 @@
     filesFromDataTransfer,
     loadSprites,
     luaSnippet,
+    posToFrameIndex,
     renderSpritesheet,
     revokeSprite,
     sortSpritesByName,
+    cellIndexToPos,
     type Align,
     type CellMode,
+    type FillOrder,
     type Sprite,
   } from './lib/sprites'
 
@@ -35,6 +38,8 @@
   let sprites: Sprite[] = $state([])
   let columns = $state(2)
   let rows = $state(1)
+  let customGrid = $state(false)
+  let fillOrder: FillOrder = $state('row')
   let cellMode: CellMode = $state('auto')
   let customWidth = $state(64)
   let customHeight = $state(64)
@@ -44,6 +49,7 @@
   let pixelated = $state(false)
   let showGrid = $state(true)
   let showIndexes = $state(true)
+  let showOrder = $state(false)
   let zoom = $state(1)
   let panX = $state(0)
   let panY = $state(0)
@@ -73,6 +79,8 @@
     computeLayout(sprites, {
       columns,
       rows,
+      compact: !customGrid,
+      fillOrder,
       cellMode,
       customWidth,
       customHeight,
@@ -84,9 +92,46 @@
   )
 
   const lua = $derived(luaSnippet(filename, layout))
-  const emptyCells = $derived(Math.max(0, layout.columns * layout.rows - sprites.length))
+  const overlayCells = $derived.by(() => {
+    const cells: { col: number; row: number; index: number | null; id: string | null }[] = []
+    for (let row = 0; row < layout.rows; row++) {
+      for (let col = 0; col < layout.columns; col++) {
+        const index = posToFrameIndex(col, row, layout, fillOrder)
+        cells.push({
+          col,
+          row,
+          index,
+          id: index === null ? null : sprites[index]?.id ?? null,
+        })
+      }
+    }
+    return cells
+  })
+  const orderDots = $derived.by(() =>
+    sprites.map((_, index) => {
+      const { col, row } = cellIndexToPos(index, layout, fillOrder)
+      return {
+        index,
+        x: (col + 0.5) * layout.cellWidth,
+        y: (row + 0.5) * layout.cellHeight,
+      }
+    }),
+  )
+  const orderPath = $derived(orderDots.map((dot) => `${dot.x},${dot.y}`).join(' '))
+  const orderStroke = $derived(Math.max(2, Math.min(layout.cellWidth, layout.cellHeight) * 0.045))
 
   $effect(() => {
+    if (!customGrid) {
+      columns = layout.columns
+      rows = layout.rows
+      return
+    }
+    if (fillOrder === 'column') {
+      const nextRows = Math.max(1, Math.round(rows) || 1)
+      const neededCols = Math.max(1, Math.ceil(sprites.length / nextRows) || 1)
+      if (columns < neededCols) columns = neededCols
+      return
+    }
     const cols = Math.max(1, Math.round(columns) || 1)
     const needed = Math.max(1, Math.ceil(sprites.length / cols) || 1)
     if (rows < needed) rows = needed
@@ -97,6 +142,8 @@
     renderSpritesheet(sheetCanvas, sprites, layout, {
       columns,
       rows,
+      compact: !customGrid,
+      fillOrder,
       cellMode,
       customWidth,
       customHeight,
@@ -218,8 +265,15 @@
       }
       const wasEmpty = sprites.length === 0
       sprites = [...sprites, ...next]
-      const cols = Math.max(1, Math.round(columns) || 1)
-      rows = Math.max(rows, Math.ceil(sprites.length / cols) || 1)
+      if (customGrid) {
+        if (fillOrder === 'column') {
+          const nextRows = Math.max(1, Math.round(rows) || 1)
+          columns = Math.max(columns, Math.ceil(sprites.length / nextRows) || 1)
+        } else {
+          const cols = Math.max(1, Math.round(columns) || 1)
+          rows = Math.max(rows, Math.ceil(sprites.length / cols) || 1)
+        }
+      }
       if (cellMode !== 'custom') {
         customWidth = Math.max(...sprites.map((sprite) => sprite.width), 1)
         customHeight = Math.max(...sprites.map((sprite) => sprite.height), 1)
@@ -411,20 +465,40 @@
     <aside class="side">
       <section class="card">
         <h2>Layout</h2>
-        <p class="hint">Type any grid ratio. Frames fill left to right, then wrap, in filename order unless you drag them.</p>
+        <p class="hint">Frames fill in filename order unless you drag them. Choose Z (row) or N (column) fill below.</p>
+
+        <label class="check">
+          <input type="checkbox" bind:checked={customGrid} />
+          Set columns and rows individually
+        </label>
 
         <div class="ratio">
           <label class="field">
             <span>Columns</span>
-            <input type="number" min="1" max="512" bind:value={columns} />
+            <input type="number" min="1" max="512" bind:value={columns} disabled={!customGrid} />
           </label>
           <span class="times" aria-hidden="true">×</span>
           <label class="field">
             <span>Rows</span>
-            <input type="number" min="1" max="512" bind:value={rows} />
+            <input type="number" min="1" max="512" bind:value={rows} disabled={!customGrid} />
           </label>
         </div>
-        <p class="hint">Factorio <code>line_length</code> is the column count. Extra cells stay empty and transparent.</p>
+        {#if customGrid}
+          <p class="hint">Factorio <code>line_length</code> is the column count. Extra cells stay empty and transparent.</p>
+        {:else}
+          <p class="hint">Auto compact: columns and rows are chosen so the sheet stays close to square.</p>
+        {/if}
+
+        <label class="field">
+          <span>Fill order</span>
+          <select bind:value={fillOrder}>
+            <option value="row">Row-major (Z) — left to right, then down</option>
+            <option value="column">Column-major (N) — top to bottom, then right</option>
+          </select>
+        </label>
+        {#if fillOrder === 'column'}
+          <p class="note">Factorio still reads files left-to-right first. Use row-major unless you need N-order packing.</p>
+        {/if}
 
         <dl class="stats">
           <div>
@@ -544,6 +618,10 @@
               <input type="checkbox" bind:checked={showIndexes} />
               Index
             </label>
+            <label class="check compact">
+              <input type="checkbox" bind:checked={showOrder} />
+              Visualise order
+            </label>
             <label class="zoom">
               <span>{Math.round(zoom * 100)}%</span>
               <input
@@ -583,21 +661,58 @@
                 style:transform="translate({panX}px, {panY}px) scale({zoom})"
               >
                 <canvas bind:this={sheetCanvas} class:pixelated></canvas>
-                {#if showGrid}
+                {#if showGrid || showIndexes}
                   <div
                     class="grid"
+                    class:no-lines={!showGrid}
                     style:grid-template-columns="repeat({layout.columns}, 1fr)"
                     style:grid-template-rows="repeat({layout.rows}, 1fr)"
                   >
-                    {#each sprites as sprite, index}
-                      <div class="cell" class:selected={selectedIds.includes(sprite.id)}>
-                        {#if showIndexes}<span>{index}</span>{/if}
+                    {#each overlayCells as cell (cell.row + ':' + cell.col)}
+                      <div
+                        class="cell"
+                        class:empty-cell={cell.index === null}
+                        class:selected={cell.id !== null && selectedIds.includes(cell.id)}
+                      >
+                        {#if showIndexes && cell.index !== null}<span>{cell.index}</span>{/if}
                       </div>
                     {/each}
-                    {#each Array.from({ length: emptyCells }) as _empty, emptyIndex (emptyIndex)}
-                      <div class="cell empty-cell"></div>
-                    {/each}
                   </div>
+                {/if}
+                {#if showOrder && orderDots.length > 0}
+                  <svg
+                    class="order-path"
+                    viewBox="0 0 {layout.sheetWidth} {layout.sheetHeight}"
+                    aria-hidden="true"
+                  >
+                    <defs>
+                      <marker
+                        id="order-arrow"
+                        viewBox="0 0 10 10"
+                        refX="8"
+                        refY="5"
+                        markerWidth="5"
+                        markerHeight="5"
+                        orient="auto-start-reverse"
+                      >
+                        <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
+                      </marker>
+                    </defs>
+                    {#if orderDots.length > 1}
+                      <polyline
+                        points={orderPath}
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width={orderStroke}
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        marker-end="url(#order-arrow)"
+                      />
+                    {/if}
+                    {#each orderDots as dot (dot.index)}
+                      <circle cx={dot.x} cy={dot.y} r={orderStroke * 0.85} fill="currentColor" />
+                    {/each}
+                  </svg>
                 {/if}
               </div>
             </div>
@@ -906,6 +1021,11 @@
     width: 100%;
   }
 
+  input:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
   .presets {
     margin-top: 10px;
   }
@@ -1162,6 +1282,20 @@
     inset: 0;
     display: grid;
     pointer-events: none;
+  }
+
+  .grid.no-lines .cell {
+    border-color: transparent;
+  }
+
+  .order-path {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    color: rgba(245, 166, 35, 0.22);
+    overflow: visible;
   }
 
   .cell {

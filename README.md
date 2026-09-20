@@ -12,7 +12,7 @@ Everything runs locally in your browser. Images never leave your machine — not
 
 - Loads PNG, WebP, GIF, JPEG, and similar image files (or a whole folder)
 - Sorts frames by filename with natural order (`frame_1`, `frame_2`, `frame_10`)
-- Packs them left-to-right, then wrapping, on any column × row grid
+- Packs them left-to-right then down (row-major / Z) or top-to-bottom then right (column-major / N), either as a near-square compact grid or on a custom column × row layout
 - Pads mixed sizes into a shared cell with 9-point alignment
 - Exports a transparent PNG and a Factorio Lua snippet (`width`, `height`, `frame_count`, `line_length`)
 - Warns if the sheet goes over Factorio’s **8192px** input limit
@@ -20,9 +20,10 @@ Everything runs locally in your browser. Images never leave your machine — not
 ## Using the tool
 
 1. Drop frames onto the preview, or use **Add images** / **Add folder**.
-2. Set **Columns × Rows**. Factorio `line_length` is the column count. Extra cells stay empty and transparent.
-3. Adjust cell size (**Auto**, **Square**, or **Custom**), scale (including 0.5× for HR → normal), and alignment.
-4. Check the live preview, then **Download PNG** and **Copy Lua**.
+2. The sheet packs itself as square as possible. Check **Set columns and rows individually** only if you want a custom grid. Factorio `line_length` is the column count. Extra cells stay empty and transparent.
+3. Pick **Row-major (Z)** or **Column-major (N)** fill order. Factorio animations still read left-to-right first, so keep Z unless you specifically want N packing.
+4. Adjust cell size (**Auto**, **Square**, or **Custom**), scale (including 0.5× for HR → normal), and alignment.
+5. Check the live preview, then **Download PNG** and **Copy Lua**.
 
 Example Lua:
 
@@ -43,7 +44,7 @@ Put that next to your entity or animation prototype and point `filename` at the 
 - Scroll to zoom toward the cursor
 - Left-drag or middle-drag to pan
 - Bottom-right grip resizes the preview pane
-- Grid and index overlay can be toggled
+- Grid, index, and **Visualise order** path overlays can be toggled (order path is off by default)
 
 ### Frames
 
