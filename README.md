@@ -1,47 +1,80 @@
-# Svelte + TS + Vite
+# Factorio Sprite Tool
 
-This template should help get you started developing with Svelte and TypeScript in Vite.
+A browser-based assembler for Factorio spritesheets. Drop a sequence of frames, lay them out on a grid, and download a PNG plus the Lua fields Factorio expects.
 
-## Recommended IDE Setup
+**Live:** [00swinter.github.io/factorio_sprite_tool_web](https://00swinter.github.io/factorio_sprite_tool_web/)
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode).
+## Privacy
 
-## Need an official Svelte framework?
+Everything runs locally in your browser. Images never leave your machine — nothing is uploaded, shared, or transmitted.
 
-Check out [SvelteKit](https://github.com/sveltejs/kit#readme), which is also powered by Vite. Deploy anywhere with its serverless-first approach and adapt to various platforms, with out of the box support for TypeScript, SCSS, and Less, and easily-added support for mdsvex, GraphQL, PostCSS, Tailwind CSS, and more.
+## What it does
 
-## Technical considerations
+- Loads PNG, WebP, GIF, JPEG, and similar image files (or a whole folder)
+- Sorts frames by filename with natural order (`frame_1`, `frame_2`, `frame_10`)
+- Packs them left-to-right, then wrapping, on any column × row grid
+- Pads mixed sizes into a shared cell with 9-point alignment
+- Exports a transparent PNG and a Factorio Lua snippet (`width`, `height`, `frame_count`, `line_length`)
+- Warns if the sheet goes over Factorio’s **8192px** input limit
 
-**Why use this over SvelteKit?**
+## Using the tool
 
-- It brings its own routing solution which might not be preferable for some users.
-- It is first and foremost a framework that just happens to use Vite under the hood, not a Vite app.
+1. Drop frames onto the preview, or use **Add images** / **Add folder**.
+2. Set **Columns × Rows**. Factorio `line_length` is the column count. Extra cells stay empty and transparent.
+3. Adjust cell size (**Auto**, **Square**, or **Custom**), scale (including 0.5× for HR → normal), and alignment.
+4. Check the live preview, then **Download PNG** and **Copy Lua**.
 
-This template contains as little as possible to get started with Vite + TypeScript + Svelte, while taking into account the developer experience with regards to HMR and intellisense. It demonstrates capabilities on par with the other `create-vite` templates and is a good starting point for beginners dipping their toes into a Vite + Svelte project.
+Example Lua:
 
-Should you later need the extended capabilities and extensibility provided by SvelteKit, the template has been structured similarly to SvelteKit so that it is easy to migrate.
-
-**Why `global.d.ts` instead of `compilerOptions.types` inside `jsconfig.json` or `tsconfig.json`?**
-
-Setting `compilerOptions.types` shuts out all other types not explicitly listed in the configuration. Using triple-slash references keeps the default TypeScript setting of accepting type information from the entire workspace, while also adding `svelte` and `vite/client` type information.
-
-**Why include `.vscode/extensions.json`?**
-
-Other templates indirectly recommend extensions via the README, but this file allows VS Code to prompt the user to install the recommended extension upon opening the project.
-
-**Why enable `allowJs` in the TS template?**
-
-While `allowJs: false` would indeed prevent the use of `.js` files in the project, it does not prevent the use of JavaScript syntax in `.svelte` files. In addition, it would force `checkJs: false`, bringing the worst of both worlds: not being able to guarantee the entire codebase is TypeScript, and also having worse typechecking for the existing JavaScript. In addition, there are valid use cases in which a mixed codebase may be relevant.
-
-**Why is HMR not preserving my local component state?**
-
-HMR state preservation comes with a number of gotchas! It has been disabled by default in both `svelte-hmr` and `@sveltejs/vite-plugin-svelte` due to its often surprising behavior. You can read the details [here](https://github.com/rixo/svelte-hmr#svelte-hmr).
-
-If you have state that's important to retain within a component, consider creating an external store which would not be replaced by HMR.
-
-```ts
-// store.ts
-// An extremely simple external store
-import { writable } from 'svelte/store'
-export default writable(0)
+```lua
+{
+  filename = "spritesheet.png",
+  width = 64,
+  height = 64,
+  frame_count = 16,
+  line_length = 2,
+}
 ```
+
+Put that next to your entity or animation prototype and point `filename` at the downloaded sheet.
+
+### Preview
+
+- Scroll to zoom toward the cursor
+- Left-drag or middle-drag to pan
+- Bottom-right grip resizes the preview pane
+- Grid and index overlay can be toggled
+
+### Frames
+
+- Drag thumbnails to reorder
+- **Sort by name** restores filename order
+- **Ctrl-click** (Strg) adds or removes frames from the selection
+- **Shift-click** selects the range between the first and last
+- **Delete** or **Delete (n)** removes the selected chunk
+- Thumbnail zoom slider enlarges the frame strip
+
+## Run locally
+
+Needs Node.js 22+.
+
+```bash
+npm install
+npm run dev
+```
+
+Then open the URL Vite prints (usually `http://localhost:5173`).
+
+```bash
+npm run build     # production build
+npm run preview   # serve the production build
+npm run check     # typecheck
+```
+
+## Deploy
+
+Pushing to `master` builds and publishes to GitHub Pages via `.github/workflows/deploy.yml`. The Pages site is served from `/factorio_sprite_tool_web/`.
+
+## Stack
+
+Svelte 5, TypeScript, and Vite. No backend.

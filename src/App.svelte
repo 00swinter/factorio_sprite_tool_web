@@ -60,7 +60,8 @@
   let loading = $state(false)
   let errorMessage = $state('')
   let copied = $state(false)
-  let selectedId = $state<string | null>(null)
+  let selectedIds: string[] = $state([])
+  let selectionAnchor = $state<string | null>(null)
   let dragFrom = $state<number | null>(null)
   let dragOverIndex = $state<number | null>(null)
   let sheetCanvas: HTMLCanvasElement | undefined = $state()
@@ -252,13 +253,19 @@
     const sprite = sprites.find((item) => item.id === id)
     if (sprite) revokeSprite(sprite)
     sprites = sprites.filter((item) => item.id !== id)
-    if (selectedId === id) selectedId = null
+    selectedIds = selectedIds.filter((item) => item !== id)
+    if (selectionAnchor === id) selectionAnchor = selectedIds[0] ?? null
+  }
+
+  function removeSelected() {
+    for (const id of [...selectedIds]) removeSprite(id)
   }
 
   function clearAll() {
     sprites.forEach(revokeSprite)
     sprites = []
-    selectedId = null
+    selectedIds = []
+    selectionAnchor = null
     zoom = 1
     panX = 0
     panY = 0
@@ -268,9 +275,39 @@
     sprites = sortSpritesByName(sprites)
   }
 
+  function selectFrame(id: string, event: MouseEvent) {
+    const index = sprites.findIndex((sprite) => sprite.id === id)
+    if (index < 0) return
+
+    if (event.shiftKey) {
+      const anchorIndex = selectionAnchor
+        ? sprites.findIndex((sprite) => sprite.id === selectionAnchor)
+        : 0
+      const from = Math.min(anchorIndex < 0 ? 0 : anchorIndex, index)
+      const to = Math.max(anchorIndex < 0 ? 0 : anchorIndex, index)
+      selectedIds = sprites.slice(from, to + 1).map((sprite) => sprite.id)
+      if (!selectionAnchor) selectionAnchor = id
+      return
+    }
+
+    if (event.ctrlKey || event.metaKey) {
+      if (selectedIds.includes(id)) {
+        selectedIds = selectedIds.filter((item) => item !== id)
+        if (selectionAnchor === id) selectionAnchor = selectedIds.at(-1) ?? null
+      } else {
+        selectedIds = [...selectedIds, id]
+        selectionAnchor = id
+      }
+      return
+    }
+
+    selectedIds = [id]
+    selectionAnchor = id
+  }
+
   function moveSelected(delta: number) {
-    if (!selectedId) return
-    const index = sprites.findIndex((sprite) => sprite.id === selectedId)
+    if (selectedIds.length !== 1) return
+    const index = sprites.findIndex((sprite) => sprite.id === selectedIds[0])
     if (index < 0) return
     const next = index + delta
     if (next < 0 || next >= sprites.length) return
@@ -281,6 +318,10 @@
   }
 
   function onFrameDragStart(index: number, event: DragEvent) {
+    if (event.ctrlKey || event.shiftKey || event.metaKey) {
+      event.preventDefault()
+      return
+    }
     dragFrom = index
     event.dataTransfer?.setData('text/plain', String(index))
     if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move'
@@ -321,15 +362,17 @@
 
 <svelte:window
   onkeydown={(event) => {
-    if (event.key === 'Delete' && selectedId) {
+    if (event.key === 'Delete' && selectedIds.length > 0) {
+      const tag = (event.target as HTMLElement | null)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       event.preventDefault()
-      removeSprite(selectedId)
+      removeSelected()
     }
-    if (event.key === 'ArrowLeft' && selectedId) {
+    if (event.key === 'ArrowLeft' && selectedIds.length === 1) {
       event.preventDefault()
       moveSelected(-1)
     }
-    if (event.key === 'ArrowRight' && selectedId) {
+    if (event.key === 'ArrowRight' && selectedIds.length === 1) {
       event.preventDefault()
       moveSelected(1)
     }
@@ -337,6 +380,9 @@
 />
 
 <div class="shell">
+  <p class="privacy" role="note">
+    Private by design. Everything runs locally in your browser — nothing is uploaded, shared, or transmitted.
+  </p>
   <header class="topbar">
     <div class="brand">
       <div class="mark" aria-hidden="true">
@@ -544,7 +590,7 @@
                     style:grid-template-rows="repeat({layout.rows}, 1fr)"
                   >
                     {#each sprites as sprite, index}
-                      <div class="cell" class:selected={sprite.id === selectedId}>
+                      <div class="cell" class:selected={selectedIds.includes(sprite.id)}>
                         {#if showIndexes}<span>{index}</span>{/if}
                       </div>
                     {/each}
@@ -593,6 +639,14 @@
             <button type="button" class="ghost" onclick={() => fileInput?.click()}>Add images</button>
             <button type="button" class="ghost" onclick={() => folderInput?.click()}>Add folder</button>
             <button type="button" class="ghost" onclick={sortByName} disabled={sprites.length < 2}>Sort by name</button>
+            <button
+              type="button"
+              class="ghost danger"
+              onclick={removeSelected}
+              disabled={selectedIds.length === 0}
+            >
+              Delete{selectedIds.length > 0 ? ` (${selectedIds.length})` : ''}
+            </button>
             <button type="button" class="ghost danger" onclick={clearAll} disabled={sprites.length === 0}>Clear</button>
           </div>
         </div>
@@ -610,6 +664,7 @@
         {#if sprites.length === 0}
           <p class="hint">No frames yet. Drop a sequence and they will assemble as {layout.columns} × {layout.rows}.</p>
         {:else}
+          <p class="hint">Ctrl-click to add frames. Shift-click to select a range. Delete removes the selection.</p>
           <ol
             class="strip"
             style:--thumb-min="{Math.round(96 * frameZoom)}px"
@@ -617,9 +672,10 @@
           >
             {#each sprites as sprite, index (sprite.id)}
               <li
-                class:selected={sprite.id === selectedId}
+                class:selected={selectedIds.includes(sprite.id)}
                 class:over={dragOverIndex === index}
                 draggable="true"
+                onclick={(event) => selectFrame(sprite.id, event)}
                 ondragstart={(event) => onFrameDragStart(index, event)}
                 ondragover={(event) => {
                   event.preventDefault()
@@ -631,12 +687,20 @@
                   dragOverIndex = null
                 }}
               >
-                <button type="button" class="thumb" onclick={() => (selectedId = sprite.id)}>
+                <button type="button" class="thumb">
                   <img src={sprite.objectUrl} alt={sprite.name} />
                   <span class="idx">{index}</span>
                 </button>
                 <p title={sprite.name}>{sprite.name}</p>
-                <button type="button" class="remove" onclick={() => removeSprite(sprite.id)} aria-label="Remove {sprite.name}">×</button>
+                <button
+                  type="button"
+                  class="remove"
+                  onclick={(event) => {
+                    event.stopPropagation()
+                    removeSprite(sprite.id)
+                  }}
+                  aria-label="Remove {sprite.name}"
+                >×</button>
               </li>
             {/each}
           </ol>
@@ -651,6 +715,16 @@
     max-width: 1440px;
     margin: 0 auto;
     padding: 24px 20px 40px;
+  }
+
+  .privacy {
+    margin: 0 0 16px;
+    padding: 9px 14px;
+    background: rgba(143, 191, 90, 0.12);
+    border: 1px solid rgba(143, 191, 90, 0.38);
+    color: var(--green);
+    font-size: 13px;
+    letter-spacing: 0.02em;
   }
 
   .topbar {
@@ -1118,8 +1192,9 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(var(--thumb-min, 96px), 1fr));
     gap: 8px;
-    margin: 0;
+    margin: 8px 0 0;
     padding: 0;
+    user-select: none;
   }
 
   .strip li {
