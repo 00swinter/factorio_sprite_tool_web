@@ -1,3 +1,5 @@
+import type { ContentTrim } from './trim'
+
 export const FACTORIO_MAX_SIZE = 8192
 
 export type Align = 'start' | 'center' | 'end'
@@ -6,7 +8,6 @@ export type FillOrder = 'row' | 'column'
 export type ExportMode = 'single' | 'split'
 /** Which axis holds one complete animation (one turret angle). */
 export type SplitAxis = 'row' | 'column'
-
 export type Sprite = {
   id: string
   name: string
@@ -28,6 +29,8 @@ export type LayoutOptions = {
   alignY: Align
   scale: number
   pixelated: boolean
+  /** Shared center-locked crop. Null leaves every frame at its source size. */
+  trim?: ContentTrim | null
 }
 
 export type SheetLayout = {
@@ -195,11 +198,16 @@ export function computeLayout(sprites: Sprite[], options: LayoutOptions): SheetL
   const frameCount = sprites.length
   const scale = Number.isFinite(options.scale) && options.scale > 0 ? options.scale : 1
 
-  const nativeMaxWidth = sprites.reduce((max, sprite) => Math.max(max, sprite.width), 0)
-  const nativeMaxHeight = sprites.reduce((max, sprite) => Math.max(max, sprite.height), 0)
-  const mixedSizes = sprites.some(
-    (sprite) => sprite.width !== nativeMaxWidth || sprite.height !== nativeMaxHeight,
-  )
+  const trim = options.trim
+  const nativeMaxWidth = trim
+    ? trim.right - trim.left
+    : sprites.reduce((max, sprite) => Math.max(max, sprite.width), 0)
+  const nativeMaxHeight = trim
+    ? trim.bottom - trim.top
+    : sprites.reduce((max, sprite) => Math.max(max, sprite.height), 0)
+  const mixedSizes = trim
+    ? false
+    : sprites.some((sprite) => sprite.width !== nativeMaxWidth || sprite.height !== nativeMaxHeight)
 
   let cellWidth: number
   let cellHeight: number
@@ -296,33 +304,268 @@ export function renderSpritesheet(
 
   const scale = Number.isFinite(options.scale) && options.scale > 0 ? options.scale : 1
 
+  const trim = options.trim
+
   sprites.forEach((sprite, index) => {
     const { col, row } = cellIndexToPos(index, layout, options.fillOrder)
     const cellX = col * layout.cellWidth
     const cellY = row * layout.cellHeight
-    const drawWidth = Math.max(1, Math.round(sprite.width * scale))
-    const drawHeight = Math.max(1, Math.round(sprite.height * scale))
-    const x = cellX + alignOffset(options.alignX, layout.cellWidth, drawWidth)
-    const y = cellY + alignOffset(options.alignY, layout.cellHeight, drawHeight)
 
     ctx.save()
     ctx.beginPath()
     ctx.rect(cellX, cellY, layout.cellWidth, layout.cellHeight)
     ctx.clip()
-    ctx.drawImage(sprite.image, x, y, drawWidth, drawHeight)
+
+    if (trim) {
+      const cropW = trim.right - trim.left
+      const cropH = trim.bottom - trim.top
+      const drawWidth = Math.max(1, Math.round(cropW * scale))
+      const drawHeight = Math.max(1, Math.round(cropH * scale))
+      const x = cellX + alignOffset(options.alignX, layout.cellWidth, drawWidth)
+      const y = cellY + alignOffset(options.alignY, layout.cellHeight, drawHeight)
+      ctx.drawImage(
+        sprite.image,
+        trim.left + sprite.width / 2,
+        trim.top + sprite.height / 2,
+        cropW,
+        cropH,
+        x,
+        y,
+        drawWidth,
+        drawHeight,
+      )
+    } else {
+      const drawWidth = Math.max(1, Math.round(sprite.width * scale))
+      const drawHeight = Math.max(1, Math.round(sprite.height * scale))
+      const x = cellX + alignOffset(options.alignX, layout.cellWidth, drawWidth)
+      const y = cellY + alignOffset(options.alignY, layout.cellHeight, drawHeight)
+      ctx.drawImage(sprite.image, x, y, drawWidth, drawHeight)
+    }
+
     ctx.restore()
   })
 }
 
-export function luaSnippet(filename: string, layout: SheetLayout): string {
+/**
+ * Pixel shift that puts the original sprite center (the building center)
+ * back on the entity. Positive x is right, positive y is down.
+ */
+export function trimmedShift(
+  trim: ContentTrim,
+  cellWidth: number,
+  cellHeight: number,
+  alignX: Align,
+  alignY: Align,
+  scale: number,
+): { x: number; y: number } {
+  const safe = Number.isFinite(scale) && scale > 0 ? scale : 1
+  const cropW = trim.right - trim.left
+  const cropH = trim.bottom - trim.top
+  const drawWidth = Math.max(1, Math.round(cropW * safe))
+  const drawHeight = Math.max(1, Math.round(cropH * safe))
+  const drawX = alignOffset(alignX, cellWidth, drawWidth)
+  const drawY = alignOffset(alignY, cellHeight, drawHeight)
+  const buildingX = drawX + (-trim.left * drawWidth) / cropW
+  const buildingY = drawY + (-trim.top * drawHeight) / cropH
+  return {
+    x: cellWidth / 2 - buildingX,
+    y: cellHeight / 2 - buildingY,
+  }
+}
+
+/** Connection offset in `util.by_pixel` units. Positive x is right, positive y is down. */
+export function wireOffset(
+  px: number,
+  py: number,
+  originX: number,
+  originY: number,
+  gameScale: number,
+  shiftX = 0,
+  shiftY = 0,
+): { x: number; y: number } {
+  const g = Number.isFinite(gameScale) ? gameScale : 1
+  return {
+    x: (px - originX) * g + shiftX,
+    y: (py - originY) * g + shiftY,
+  }
+}
+
+const INGAME_TILE = 32
+
+function tileIndex(gamePx: number, edge: 'start' | 'end'): number {
+  const shifted = gamePx / INGAME_TILE + 0.5
+  if (edge === 'end') return Math.floor(shifted - 1e-9)
+  return Math.floor(shifted)
+}
+
+/**
+ * Draw one exported frame on a Factorio tile grid.
+ * One tile is 32 game pixels. The frame's center sits on the placement
+ * point, then the picture shift (already in game pixels) is applied.
+ */
+export function drawIngamePreview(
+  canvas: HTMLCanvasElement,
+  cell: HTMLCanvasElement | null,
+  options: {
+    gameScale: number
+    shiftX: number
+    shiftY: number
+    pixelated: boolean
+    maxWidth?: number
+    maxHeight?: number
+  },
+): void {
+  const maxWidth = options.maxWidth ?? 256
+  const maxHeight = options.maxHeight ?? 160
+  const gameScale = Number.isFinite(options.gameScale) ? options.gameScale : 1
+  const shiftX = Number.isFinite(options.shiftX) ? options.shiftX : 0
+  const shiftY = Number.isFinite(options.shiftY) ? options.shiftY : 0
+  const showSprite = cell !== null && cell.width > 0 && cell.height > 0 && gameScale > 0
+
+  let i0 = -3
+  let i1 = 3
+  let j0 = 0
+  let j1 = 0
+  if (showSprite && cell) {
+    const worldW = cell.width * gameScale
+    const worldH = cell.height * gameScale
+    i0 = Math.min(-3, tileIndex(shiftX - worldW / 2, 'start') - 1)
+    i1 = Math.max(3, tileIndex(shiftX + worldW / 2, 'end') + 1)
+    j0 = Math.min(0, tileIndex(shiftY - worldH / 2, 'start') - 1)
+    j1 = Math.max(0, tileIndex(shiftY + worldH / 2, 'end') + 1)
+  }
+
+  const cols = i1 - i0 + 1
+  const rows = j1 - j0 + 1
+  const tilePx = Math.min(28, maxWidth / cols, maxHeight / rows)
+  const cssW = cols * tilePx
+  const cssH = rows * tilePx
+  const dpr = Math.min(2, globalThis.devicePixelRatio || 1)
+
+  canvas.width = Math.max(1, Math.round(cssW * dpr))
+  canvas.height = Math.max(1, Math.round(cssH * dpr))
+  canvas.style.width = `${cssW}px`
+  canvas.style.height = `${cssH}px`
+
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, cssW, cssH)
+
+  const originX = (i0 - 0.5) * INGAME_TILE
+  const originY = (j0 - 0.5) * INGAME_TILE
+  const pxPerGame = tilePx / INGAME_TILE
+  const toX = (gamePx: number) => (gamePx - originX) * pxPerGame
+  const toY = (gamePx: number) => (gamePx - originY) * pxPerGame
+
+  for (let j = j0; j <= j1; j++) {
+    for (let i = i0; i <= i1; i++) {
+      ctx.fillStyle = i === 0 && j === 0 ? '#3d3424' : (i + j) % 2 === 0 ? '#2e2c28' : '#26241f'
+      ctx.fillRect(toX((i - 0.5) * INGAME_TILE), toY((j - 0.5) * INGAME_TILE), tilePx + 0.5, tilePx + 0.5)
+    }
+  }
+
+  ctx.strokeStyle = '#6f6a60'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  for (let i = i0; i <= i1 + 1; i++) {
+    const x = toX((i - 0.5) * INGAME_TILE)
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, cssH)
+  }
+  for (let j = j0; j <= j1 + 1; j++) {
+    const y = toY((j - 0.5) * INGAME_TILE)
+    ctx.moveTo(0, y)
+    ctx.lineTo(cssW, y)
+  }
+  ctx.stroke()
+
+  if (showSprite && cell) {
+    const worldW = cell.width * gameScale
+    const worldH = cell.height * gameScale
+    ctx.imageSmoothingEnabled = !options.pixelated
+    ctx.drawImage(cell, toX(shiftX - worldW / 2), toY(shiftY - worldH / 2), worldW * pxPerGame, worldH * pxPerGame)
+  }
+
+  const homeX = toX(-INGAME_TILE / 2)
+  const homeY = toY(-INGAME_TILE / 2)
+  ctx.strokeStyle = '#f5a623'
+  ctx.lineWidth = Math.max(1.5, tilePx * 0.07)
+  ctx.strokeRect(homeX + 1, homeY + 1, tilePx - 2, tilePx - 2)
+
+  const cx = toX(0)
+  const cy = toY(0)
+  const arm = Math.max(4, tilePx * 0.22)
+  ctx.lineCap = 'square'
+  ctx.strokeStyle = '#000'
+  ctx.lineWidth = Math.max(2.5, tilePx * 0.12)
+  ctx.beginPath()
+  ctx.moveTo(cx - arm, cy)
+  ctx.lineTo(cx + arm, cy)
+  ctx.moveTo(cx, cy - arm)
+  ctx.lineTo(cx, cy + arm)
+  ctx.stroke()
+  ctx.strokeStyle = '#f5a623'
+  ctx.lineWidth = Math.max(1, tilePx * 0.045)
+  ctx.beginPath()
+  ctx.moveTo(cx - arm, cy)
+  ctx.lineTo(cx + arm, cy)
+  ctx.moveTo(cx, cy - arm)
+  ctx.lineTo(cx, cy + arm)
+  ctx.stroke()
+}
+
+export function formatLuaNumber(value: number): string {
+  if (!Number.isFinite(value)) return '0'
+  const rounded = Math.round(value * 1000) / 1000
+  if (Math.abs(rounded) < 5e-4) return '0'
+  if (Math.abs(rounded - Math.round(rounded)) < 5e-4) return String(Math.round(rounded))
+  return String(rounded)
+}
+
+export type LuaSpriteExtra = {
+  shift?: { x: number; y: number } | null
+  /** Factorio sprite scale. The shift is already multiplied by this. */
+  scale?: number | null
+  directions?: boolean
+  shadow?: boolean
+}
+
+function luaBlock(fields: string[]): string {
+  const body = fields.map((field, index) => {
+    const comma = index === fields.length - 1 ? '' : ','
+    return `  ${field}${comma}`
+  })
+  return `{\n${body.join('\n')}\n}`
+}
+
+function pushSpriteExtras(fields: string[], extra?: LuaSpriteExtra | null): void {
+  if (!extra) return
+  if (extra.shift) {
+    fields.push(
+      `shift = util.by_pixel(${formatLuaNumber(extra.shift.x)}, ${formatLuaNumber(extra.shift.y)})`,
+    )
+  }
+  if (extra.scale != null) fields.push(`scale = ${formatLuaNumber(extra.scale)}`)
+  if (extra.shadow) fields.push('draw_as_shadow = true')
+}
+
+export function luaSnippet(filename: string, layout: SheetLayout, extra?: LuaSpriteExtra | null): string {
   const safeName = filename.trim() || 'spritesheet.png'
-  return `{
-  filename = "${safeName}",
-  width = ${layout.cellWidth},
-  height = ${layout.cellHeight},
-  frame_count = ${layout.frameCount},
-  line_length = ${layout.columns},
-}`
+  const fields = [
+    `filename = "${safeName}"`,
+    `width = ${layout.cellWidth}`,
+    `height = ${layout.cellHeight}`,
+  ]
+  if (extra?.directions) {
+    fields.push(`direction_count = ${layout.frameCount}`)
+    fields.push(`line_length = ${layout.columns}`)
+  } else {
+    fields.push(`frame_count = ${layout.frameCount}`)
+    fields.push(`line_length = ${layout.columns}`)
+  }
+  pushSpriteExtras(fields, extra)
+  return luaBlock(fields)
 }
 
 export type SplitSheet = {
@@ -500,7 +743,7 @@ export function splitLayoutOptions(
   }
 }
 
-export function luaStripesSnippet(plan: SplitPlan): string {
+export function luaStripesSnippet(plan: SplitPlan, extra?: LuaSpriteExtra | null): string {
   const stripes = plan.sheets
     .map(
       (sheet) => `    {
@@ -511,15 +754,12 @@ export function luaStripesSnippet(plan: SplitPlan): string {
     )
     .join(',\n')
 
-  return `{
-  width = ${plan.cellWidth},
-  height = ${plan.cellHeight},
-  frame_count = ${plan.animationLength},
-  direction_count = ${plan.directionCount},
-  stripes = {
-${stripes}
-  },
-}`
+  const fields = [`width = ${plan.cellWidth}`, `height = ${plan.cellHeight}`]
+  pushSpriteExtras(fields, extra ? { ...extra, directions: false } : extra)
+  fields.push(`frame_count = ${plan.animationLength}`)
+  fields.push(`direction_count = ${plan.directionCount}`)
+  fields.push(`stripes = {\n${stripes}\n  }`)
+  return luaBlock(fields)
 }
 
 export function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {

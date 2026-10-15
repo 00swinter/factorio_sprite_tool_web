@@ -7,10 +7,12 @@
     downloadCanvas,
     filesFromDataTransfer,
     loadSprites,
+    formatLuaNumber,
     luaSnippet,
     luaStripesSnippet,
     planSplitSheets,
     posToFrameIndex,
+    drawIngamePreview,
     renderSpritesheet,
     revokeSprite,
     sortSpritesByName,
@@ -18,14 +20,25 @@
     pngBasename,
     spritesForSplitSheet,
     splitLayoutOptions,
+    trimmedShift,
+    wireOffset,
     zipFilename,
     type Align,
     type CellMode,
     type ExportMode,
     type FillOrder,
+    type LuaSpriteExtra,
     type SplitAxis,
     type Sprite,
   } from './lib/sprites'
+  import {
+    buildingInsideTrim,
+    measureImageBounds,
+    sharedTrim,
+    sizesMixParity,
+    trimSize,
+    type CenterBox,
+  } from './lib/trim'
   import { zipBlobs } from './lib/zip'
 
   const ZOOM_MIN = 0.05
@@ -65,6 +78,19 @@
   let alignY: Align = $state('center')
   let scale = $state(1)
   let pixelated = $state(false)
+  let trimEnabled = $state(false)
+  let trimAlpha = $state(0)
+  let trimMargin = $state(0)
+  let asDirections = $state(false)
+  let drawAsShadow = $state(false)
+  let showCenter = $state(true)
+  let measuredFrames = $state<{ id: string; bounds: CenterBox | null }[]>([])
+  let gameScale = $state(1)
+  let wireShiftX = $state(0)
+  let wireShiftY = $state(0)
+  let wireShiftManual = $state(false)
+  let hoverPoint = $state<{ frame: number; px: number; py: number } | null>(null)
+  let copiedWire = $state('')
   let showGrid = $state(true)
   let showIndexes = $state(true)
   let showOrder = $state(false)
@@ -72,8 +98,15 @@
   let panX = $state(0)
   let panY = $state(0)
   let panning = $state(false)
+  let worldZoom = $state(1)
+  let worldPanX = $state(0)
+  let worldPanY = $state(0)
+  let worldPanning = $state(false)
   let panLastX = 0
   let panLastY = 0
+  let worldPanLastX = 0
+  let worldPanLastY = 0
+  let worldFittedKey = ''
   let previewHeight = $state(420)
   let frameZoom = $state(1)
   let resizingPreview = $state(false)
@@ -89,9 +122,28 @@
   let dragFrom = $state<number | null>(null)
   let dragOverIndex = $state<number | null>(null)
   let sheetCanvas: HTMLCanvasElement | undefined = $state()
+  let worldCanvas: HTMLCanvasElement | undefined = $state()
+  let worldView: HTMLDivElement | undefined = $state()
   let boardWrap: HTMLDivElement | undefined = $state()
   let fileInput: HTMLInputElement | undefined = $state()
   let folderInput: HTMLInputElement | undefined = $state()
+
+  const measuredReady = $derived(
+    measuredFrames.length === sprites.length &&
+      measuredFrames.every((frame, index) => frame.id === sprites[index]?.id),
+  )
+
+  const contentTrim = $derived.by(() => {
+    if (!trimEnabled || !measuredReady) return null
+    return sharedTrim(
+      sprites.map((sprite, index) => ({
+        width: sprite.width,
+        height: sprite.height,
+        bounds: measuredFrames[index]?.bounds ?? null,
+      })),
+      trimMargin,
+    )
+  })
 
   const layoutOptions = $derived({
     columns,
@@ -105,6 +157,7 @@
     alignY,
     scale,
     pixelated,
+    trim: contentTrim,
   })
 
   const splitPlan = $derived(
@@ -126,9 +179,130 @@
       : layoutOptions,
   )
   const layout = $derived(computeLayout(previewSprites, previewOptions))
-  const lua = $derived(
-    exportMode === 'split' ? luaStripesSnippet(splitPlan) : luaSnippet(filename, layout),
+  const shift = $derived.by(() => {
+    if (!contentTrim) return null
+    const cellWidth = exportMode === 'split' ? splitPlan.cellWidth : layout.cellWidth
+    const cellHeight = exportMode === 'split' ? splitPlan.cellHeight : layout.cellHeight
+    return trimmedShift(contentTrim, cellWidth, cellHeight, alignX, alignY, scale)
+  })
+  const appliedScale = $derived(Number.isFinite(gameScale) ? gameScale : 1)
+  const pictureShift = $derived.by(() => {
+    if (wireShiftManual) {
+      return {
+        x: Number.isFinite(wireShiftX) ? wireShiftX : 0,
+        y: Number.isFinite(wireShiftY) ? wireShiftY : 0,
+      }
+    }
+    if (!shift) return { x: 0, y: 0 }
+    return { x: shift.x * appliedScale, y: shift.y * appliedScale }
+  })
+  const luaExtra = $derived<LuaSpriteExtra | null>(
+    trimEnabled || appliedScale !== 1 || pictureShift.x !== 0 || pictureShift.y !== 0
+      ? {
+          shift: trimEnabled || pictureShift.x !== 0 || pictureShift.y !== 0 ? pictureShift : null,
+          scale: trimEnabled || appliedScale !== 1 ? appliedScale : null,
+          directions: exportMode === 'single' && trimEnabled && asDirections,
+          shadow: trimEnabled && drawAsShadow,
+        }
+      : null,
   )
+  const worldSprite = $derived.by(() => {
+    if (previewSprites.length === 0) return null
+    return previewSprites.find((sprite) => selectedIds.includes(sprite.id)) ?? previewSprites[0]
+  })
+  const worldFrameIndex = $derived(worldSprite ? previewSprites.indexOf(worldSprite) : -1)
+  const worldCaption = $derived.by(() => {
+    if (!worldSprite) return 'Each square is one tile on the ground.'
+    const g = appliedScale > 0 ? appliedScale : 0
+    const tilesWide = (layout.cellWidth * g) / 32
+    const tilesTall = (layout.cellHeight * g) / 32
+    return `Frame ${worldFrameIndex} is ${formatLuaNumber(tilesWide)} × ${formatLuaNumber(tilesTall)} tiles. The orange square is where it is placed.`
+  })
+  const lua = $derived(
+    exportMode === 'split'
+      ? luaStripesSnippet(splitPlan, luaExtra)
+      : luaSnippet(filename, layout, luaExtra),
+  )
+  const trimParityMix = $derived(
+    trimEnabled &&
+      (sizesMixParity(sprites.map((sprite) => sprite.width)) ||
+        sizesMixParity(sprites.map((sprite) => sprite.height))),
+  )
+  const sourceSizeLabel = $derived.by(() => {
+    if (sprites.length === 0) return '—'
+    const { width, height } = sprites[0]
+    return sprites.every((sprite) => sprite.width === width && sprite.height === height)
+      ? `${width}×${height}`
+      : 'mixed'
+  })
+  const cropLabel = $derived.by(() => {
+    if (!contentTrim) return '—'
+    const { width, height } = trimSize(contentTrim)
+    return `${formatLuaNumber(width)}×${formatLuaNumber(height)}`
+  })
+  const shiftLabel = $derived(
+    contentTrim ? `${formatLuaNumber(pictureShift.x)} × ${formatLuaNumber(pictureShift.y)}` : '—',
+  )
+  const centerOutside = $derived(Boolean(contentTrim && !buildingInsideTrim(contentTrim)))
+  const trimClipped = $derived.by(() => {
+    if (!contentTrim) return false
+    const { width, height } = trimSize(contentTrim)
+    const safe = Number.isFinite(scale) && scale > 0 ? scale : 1
+    const drawW = Math.max(1, Math.round(width * safe))
+    const drawH = Math.max(1, Math.round(height * safe))
+    const cellWidth = exportMode === 'split' ? splitPlan.cellWidth : layout.cellWidth
+    const cellHeight = exportMode === 'split' ? splitPlan.cellHeight : layout.cellHeight
+    return cellWidth < drawW || cellHeight < drawH
+  })
+  const orangeInCell = $derived.by(() => {
+    if (!contentTrim) return null
+    const mark = trimmedShift(
+      contentTrim,
+      layout.cellWidth,
+      layout.cellHeight,
+      previewOptions.alignX,
+      previewOptions.alignY,
+      previewOptions.scale,
+    )
+    return {
+      x: layout.cellWidth / 2 - mark.x,
+      y: layout.cellHeight / 2 - mark.y,
+    }
+  })
+  const centerMarks = $derived.by(() => {
+    if (!showCenter || !orangeInCell) return []
+    const { x, y } = orangeInCell
+    if (x < -0.5 || y < -0.5 || x > layout.cellWidth + 0.5 || y > layout.cellHeight + 0.5) return []
+    return previewSprites.map((_, index) => {
+      const pos = cellIndexToPos(index, layout, previewOptions.fillOrder)
+      return {
+        index,
+        x: pos.col * layout.cellWidth + x,
+        y: pos.row * layout.cellHeight + y,
+      }
+    })
+  })
+  const centerArm = $derived(Math.max(4, Math.min(layout.cellWidth, layout.cellHeight) * 0.12))
+  const hoverWire = $derived.by(() => {
+    if (!hoverPoint) return null
+    return {
+      frame: hoverPoint.frame,
+      px: hoverPoint.px,
+      py: hoverPoint.py,
+      center: wireOffset(
+        hoverPoint.px,
+        hoverPoint.py,
+        layout.cellWidth / 2,
+        layout.cellHeight / 2,
+        appliedScale,
+        pictureShift.x,
+        pictureShift.y,
+      ),
+      orange: orangeInCell
+        ? wireOffset(hoverPoint.px, hoverPoint.py, orangeInCell.x, orangeInCell.y, appliedScale)
+        : null,
+    }
+  })
   const sheetRange = $derived.by(() => {
     if (exportMode !== 'split' || !activeSheet) return null
     const start = activeSheet.startGroup * splitPlan.animationLength
@@ -196,6 +370,99 @@
   })
 
   $effect(() => {
+    const canvas = worldCanvas
+    if (!canvas) return
+    const sprite = worldSprite
+    const cell =
+      sprite && layout.cellWidth > 0 && layout.cellHeight > 0
+        ? document.createElement('canvas')
+        : null
+    if (cell && sprite) {
+      renderSpritesheet(
+        cell,
+        [sprite],
+        {
+          ...layout,
+          columns: 1,
+          rows: 1,
+          sheetWidth: layout.cellWidth,
+          sheetHeight: layout.cellHeight,
+          frameCount: 1,
+        },
+        previewOptions,
+      )
+    }
+    drawIngamePreview(canvas, cell, {
+      gameScale: appliedScale,
+      shiftX: pictureShift.x,
+      shiftY: pictureShift.y,
+      pixelated,
+    })
+    const view = worldView
+    const cssW = canvas.clientWidth
+    const cssH = canvas.clientHeight
+    const key = `${cssW}x${cssH}`
+    if (view && cssW > 0 && cssH > 0 && key !== worldFittedKey) {
+      worldFittedKey = key
+      const z = untrack(() => worldZoom)
+      worldPanX = (view.clientWidth - cssW * z) / 2
+      worldPanY = (view.clientHeight - cssH * z) / 2
+    }
+  })
+
+  $effect(() => {
+    const view = worldView
+    if (!view) return
+
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault()
+      const rect = view.getBoundingClientRect()
+      applyWorldZoom(
+        untrack(() => worldZoom) * Math.exp(-event.deltaY * 0.0018),
+        event.clientX - rect.left,
+        event.clientY - rect.top,
+      )
+    }
+
+    const preventMiddleAutoscroll = (event: MouseEvent) => {
+      if (event.button === 1) event.preventDefault()
+    }
+
+    view.addEventListener('wheel', onWheel, { passive: false })
+    view.addEventListener('mousedown', preventMiddleAutoscroll)
+    return () => {
+      view.removeEventListener('wheel', onWheel)
+      view.removeEventListener('mousedown', preventMiddleAutoscroll)
+    }
+  })
+
+  $effect(() => {
+    if (!trimEnabled) return
+    const alpha = trimAlpha
+    const list = sprites
+    measuredFrames = list.map((sprite) => ({
+      id: sprite.id,
+      bounds: measureImageBounds(sprite.image, sprite.width, sprite.height, alpha),
+    }))
+  })
+
+  $effect(() => {
+    if (wireShiftManual) return
+    if (!shift) {
+      wireShiftX = 0
+      wireShiftY = 0
+      return
+    }
+    const g = Number.isFinite(gameScale) ? gameScale : 1
+    wireShiftX = shift.x * g
+    wireShiftY = shift.y * g
+  })
+
+  $effect(() => {
+    if (sprites.length === 0) hoverPoint = null
+  })
+
+  $effect(() => {
     const wrap = boardWrap
     if (!wrap) return
 
@@ -259,11 +526,73 @@
   }
 
   function onPreviewPointerMove(event: PointerEvent) {
+    updateHover(event)
     if (!panning) return
     panX += event.clientX - panLastX
     panY += event.clientY - panLastY
     panLastX = event.clientX
     panLastY = event.clientY
+  }
+
+  function updateHover(event: PointerEvent) {
+    const wrap = boardWrap
+    if (!wrap || sprites.length === 0 || layout.cellWidth < 1 || layout.cellHeight < 1) {
+      hoverPoint = null
+      return
+    }
+    const board = wrap.querySelector('.board')
+    if (!(board instanceof HTMLElement)) {
+      hoverPoint = null
+      return
+    }
+    const rect = board.getBoundingClientRect()
+    const scaleX = rect.width / layout.sheetWidth
+    const scaleY = rect.height / layout.sheetHeight
+    if (scaleX <= 0 || scaleY <= 0) {
+      hoverPoint = null
+      return
+    }
+    const sheetX = (event.clientX - rect.left) / scaleX
+    const sheetY = (event.clientY - rect.top) / scaleY
+    if (sheetX < 0 || sheetY < 0 || sheetX >= layout.sheetWidth || sheetY >= layout.sheetHeight) {
+      hoverPoint = null
+      return
+    }
+    const col = Math.min(layout.columns - 1, Math.floor(sheetX / layout.cellWidth))
+    const row = Math.min(layout.rows - 1, Math.floor(sheetY / layout.cellHeight))
+    const index = posToFrameIndex(col, row, layout, previewOptions.fillOrder)
+    if (index === null) {
+      hoverPoint = null
+      return
+    }
+    const px = sheetX - col * layout.cellWidth
+    const py = sheetY - row * layout.cellHeight
+    hoverPoint = {
+      frame: (sheetRange?.start ?? 0) + index,
+      px,
+      py,
+    }
+  }
+
+  function useCropShift() {
+    wireShiftManual = false
+  }
+
+  function wireCall(point: { x: number; y: number }): string {
+    return `util.by_pixel(${formatLuaNumber(point.x)}, ${formatLuaNumber(point.y)})`
+  }
+
+  async function copyWire(point: { x: number; y: number }, key: string) {
+    const text = wireCall(point)
+    try {
+      await navigator.clipboard.writeText(text)
+      copiedWire = key
+      setTimeout(() => {
+        if (copiedWire === key) copiedWire = ''
+      }, 1200)
+    } catch {
+      errorMessage = 'Could not copy the wire coordinate.'
+    }
   }
 
   function onPreviewPointerUp(event: PointerEvent) {
@@ -278,6 +607,47 @@
       Number((event.currentTarget as HTMLInputElement).value),
       wrap ? wrap.clientWidth / 2 : 0,
       wrap ? wrap.clientHeight / 2 : 0,
+    )
+  }
+
+  function applyWorldZoom(nextZoom: number, originX: number, originY: number) {
+    const next = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, nextZoom))
+    const prev = worldZoom
+    if (next === prev) return
+    worldPanX = originX - ((originX - worldPanX) / prev) * next
+    worldPanY = originY - ((originY - worldPanY) / prev) * next
+    worldZoom = next
+  }
+
+  function onWorldPointerDown(event: PointerEvent) {
+    if (event.button !== 0 && event.button !== 1) return
+    event.preventDefault()
+    worldPanning = true
+    worldPanLastX = event.clientX
+    worldPanLastY = event.clientY
+    capturePointer(event)
+  }
+
+  function onWorldPointerMove(event: PointerEvent) {
+    if (!worldPanning) return
+    worldPanX += event.clientX - worldPanLastX
+    worldPanY += event.clientY - worldPanLastY
+    worldPanLastX = event.clientX
+    worldPanLastY = event.clientY
+  }
+
+  function onWorldPointerUp(event: PointerEvent) {
+    if (!worldPanning) return
+    worldPanning = false
+    releasePointer(event)
+  }
+
+  function onWorldZoomSlider(event: Event) {
+    const view = worldView
+    applyWorldZoom(
+      Number((event.currentTarget as HTMLInputElement).value),
+      view ? view.clientWidth / 2 : 0,
+      view ? view.clientHeight / 2 : 0,
     )
   }
 
@@ -509,6 +879,12 @@
     previewSheet = 0
   }
 
+  async function setTrimEnabled(enabled: boolean) {
+    trimEnabled = enabled
+    await tick()
+    centerPreview()
+  }
+
   async function copyLua() {
     try {
       await navigator.clipboard.writeText(lua)
@@ -587,6 +963,49 @@
 
   <div class="workspace">
     <aside class="side">
+      <section class="card">
+        <h2>Scale</h2>
+        <div
+          class="world-view"
+          class:panning={worldPanning}
+          bind:this={worldView}
+          role="application"
+          aria-label="In-game size. Scroll to zoom, drag to pan."
+          title="Scroll to zoom, drag with left or middle mouse to pan"
+          onpointerdown={onWorldPointerDown}
+          onpointermove={onWorldPointerMove}
+          onpointerup={onWorldPointerUp}
+          onpointercancel={onWorldPointerUp}
+        >
+          <canvas
+            bind:this={worldCanvas}
+            style:transform="translate({worldPanX}px, {worldPanY}px) scale({worldZoom})"
+          ></canvas>
+        </div>
+        <div class="world-tools">
+          <p class="hint">{worldCaption}</p>
+          <label class="zoom">
+            <span>{Math.round(worldZoom * 100)}%</span>
+            <input
+              type="range"
+              min={ZOOM_MIN}
+              max={ZOOM_MAX}
+              step="0.05"
+              value={worldZoom}
+              aria-label="In-game preview zoom"
+              oninput={onWorldZoomSlider}
+            />
+          </label>
+        </div>
+        <label class="field">
+          <span>In-game scale</span>
+          <input type="number" step="0.1" bind:value={gameScale} />
+        </label>
+        <p class="hint">
+          Factorio draws the sprite at this size. The hover coordinates, the trim shift, and the Lua all use this number, so the center stays on the placement point.
+        </p>
+      </section>
+
       <section class="card">
         <h2>Layout</h2>
         <div class="presets">
@@ -799,7 +1218,7 @@
         </div>
 
         <label class="field">
-          <span>Scale</span>
+          <span>Resize</span>
           <select
             value={String(scale)}
             onchange={(event) => {
@@ -834,6 +1253,83 @@
             {/each}
           </div>
         </div>
+      </section>
+
+      <section class="card">
+        <h2>Tight crop</h2>
+        <label class="check">
+          <input
+            type="checkbox"
+            checked={trimEnabled}
+            onchange={(event) => setTrimEnabled((event.currentTarget as HTMLInputElement).checked)}
+          />
+          Trim empty space
+        </label>
+        <p class="hint">
+          Optional. Cuts one shared window out of every frame, locked to the building center, so the frames stay lined up. The Lua shift puts that center back on the entity. Set the cell to Auto and the sheet shrinks to that window.
+        </p>
+        {#if trimEnabled}
+          <div class="row">
+            <label class="field">
+              <span>Empty alpha</span>
+              <input type="number" min="0" max="255" bind:value={trimAlpha} />
+            </label>
+            <label class="field">
+              <span>Margin</span>
+              <input type="number" min="0" max="512" bind:value={trimMargin} />
+            </label>
+          </div>
+          <p class="hint">Pixels at or below that alpha count as empty. Margin keeps a ring of pixels around the art.</p>
+
+          {#if exportMode === 'single'}
+            <label class="check">
+              <input type="checkbox" bind:checked={asDirections} />
+              Frames are directions
+            </label>
+            <p class="hint">
+              For a pole strip. Emits <code>direction_count</code> and <code>line_length</code> instead of <code>frame_count</code>. Keep row-major fill so the first frame is the left one.
+            </p>
+          {/if}
+          <label class="check">
+            <input type="checkbox" bind:checked={drawAsShadow} />
+            Shadow layer
+          </label>
+
+          <dl class="stats">
+            <div>
+              <dt>Source</dt>
+              <dd>{sourceSizeLabel}</dd>
+            </div>
+            <div>
+              <dt>Cropped</dt>
+              <dd>{cropLabel}</dd>
+            </div>
+            <div>
+              <dt>Shift px</dt>
+              <dd>{shiftLabel}</dd>
+            </div>
+            <div>
+              <dt>Scale</dt>
+              <dd>{formatLuaNumber(appliedScale)}</dd>
+            </div>
+          </dl>
+
+          <p class="hint">
+            Crop the pole and the shadow as two separate sets if each picture should shrink to its own pixels. Each shift still meets at the building center. Load them together only when they share one sheet.
+          </p>
+          {#if sprites.length > 0 && measuredReady && !contentTrim}
+            <p class="warn">Every frame is fully transparent, so there is nothing to trim.</p>
+          {/if}
+          {#if trimParityMix}
+            <p class="note">Frame sizes mix odd and even. The center still lines up, but it can sit between pixels on some frames.</p>
+          {/if}
+          {#if centerOutside}
+            <p class="note">The building center sits outside the trimmed pixels. The shift still puts it back on the entity.</p>
+          {/if}
+          {#if trimClipped}
+            <p class="warn">The cell is smaller than the cropped frame, so the picture is clipped and the shift will not match.</p>
+          {/if}
+        {/if}
       </section>
 
       <section class="card">
@@ -906,6 +1402,12 @@
               <input type="checkbox" bind:checked={showOrder} />
               Visualise order
             </label>
+            {#if trimEnabled}
+              <label class="check compact">
+                <input type="checkbox" bind:checked={showCenter} />
+                Center
+              </label>
+            {/if}
             <label class="zoom">
               <span>{Math.round(zoom * 100)}%</span>
               <input
@@ -928,6 +1430,41 @@
               <span class="empty-note">They will be sorted by filename, so frame_1, frame_2, frame_10 stay in order.</span>
             </button>
           {:else}
+            <div class="hover-readout">
+              <div class="hover-knobs">
+                <label>
+                  shift
+                  <input type="number" step="any" bind:value={wireShiftX} oninput={() => (wireShiftManual = true)} />
+                  <input type="number" step="any" bind:value={wireShiftY} oninput={() => (wireShiftManual = true)} />
+                </label>
+                {#if wireShiftManual && contentTrim}
+                  <button type="button" class="wire-link" onclick={useCropShift}>use crop</button>
+                {/if}
+              </div>
+              {#if hoverWire}
+                <p class="hover-px">frame {hoverWire.frame} · px {formatLuaNumber(hoverWire.px)}, {formatLuaNumber(hoverWire.py)}</p>
+                <button
+                  type="button"
+                  class="wire-line"
+                  title="From the middle of this frame, times scale, plus the picture shift. Click to copy."
+                  onclick={() => copyWire(hoverWire!.center, 'center')}
+                >
+                  center {copiedWire === 'center' ? 'copied' : wireCall(hoverWire.center)}
+                </button>
+                {#if hoverWire.orange}
+                  <button
+                    type="button"
+                    class="wire-line orange"
+                    title="From the orange cross, times scale. Click to copy."
+                    onclick={() => hoverWire?.orange && copyWire(hoverWire.orange, 'orange')}
+                  >
+                    orange {copiedWire === 'orange' ? 'copied' : wireCall(hoverWire.orange)}
+                  </button>
+                {/if}
+              {:else}
+                <p class="hover-px">Hover a frame. −y is up.</p>
+              {/if}
+            </div>
             <div
               class="board-wrap"
               class:panning
@@ -937,6 +1474,18 @@
               onpointermove={onPreviewPointerMove}
               onpointerup={onPreviewPointerUp}
               onpointercancel={onPreviewPointerUp}
+              onpointerleave={(event) => {
+                const next = event.relatedTarget
+                const viewport = event.currentTarget
+                if (
+                  next instanceof Node &&
+                  viewport instanceof HTMLElement &&
+                  viewport.parentElement?.contains(next)
+                ) {
+                  return
+                }
+                hoverPoint = null
+              }}
             >
               <div
                 class="board"
@@ -962,6 +1511,48 @@
                       </div>
                     {/each}
                   </div>
+                {/if}
+                {#if centerMarks.length > 0}
+                  <svg
+                    class="center-mark"
+                    viewBox="0 0 {layout.sheetWidth} {layout.sheetHeight}"
+                    aria-hidden="true"
+                  >
+                    {#each centerMarks as mark (mark.index)}
+                      <line
+                        x1={mark.x - centerArm}
+                        y1={mark.y}
+                        x2={mark.x + centerArm}
+                        y2={mark.y}
+                        stroke="#000"
+                        stroke-width={Math.max(2, centerArm * 0.22)}
+                      />
+                      <line
+                        x1={mark.x}
+                        y1={mark.y - centerArm}
+                        x2={mark.x}
+                        y2={mark.y + centerArm}
+                        stroke="#000"
+                        stroke-width={Math.max(2, centerArm * 0.22)}
+                      />
+                      <line
+                        x1={mark.x - centerArm}
+                        y1={mark.y}
+                        x2={mark.x + centerArm}
+                        y2={mark.y}
+                        stroke="#f5a623"
+                        stroke-width={Math.max(1, centerArm * 0.1)}
+                      />
+                      <line
+                        x1={mark.x}
+                        y1={mark.y - centerArm}
+                        x2={mark.x}
+                        y2={mark.y + centerArm}
+                        stroke="#f5a623"
+                        stroke-width={Math.max(1, centerArm * 0.1)}
+                      />
+                    {/each}
+                  </svg>
                 {/if}
                 {#if showOrder && orderDots.length > 0}
                   <svg
@@ -1234,6 +1825,49 @@
   .side {
     display: grid;
     gap: 12px;
+  }
+
+  .world-view {
+    position: relative;
+    height: 168px;
+    margin-top: 12px;
+    overflow: hidden;
+    background: #1a1916;
+    border: 1px solid #000;
+    box-shadow: inset 0 0 0 1px #3a3832;
+    overscroll-behavior: contain;
+    touch-action: none;
+    cursor: default;
+    user-select: none;
+  }
+
+  .world-view.panning {
+    cursor: grabbing;
+  }
+
+  .world-view canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: auto;
+    height: auto;
+    max-width: none;
+    transform-origin: 0 0;
+  }
+
+  .world-tools {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .world-tools .hint {
+    margin: 8px 0 0;
+  }
+
+  .world-tools .zoom input {
+    width: 72px;
   }
 
   .stage {
@@ -1527,6 +2161,76 @@
     min-height: 180px;
   }
 
+  .hover-readout {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 4;
+    max-width: min(280px, calc(100% - 16px));
+    padding: 6px 8px;
+    background: rgba(15, 14, 12, 0.9);
+    border: 1px solid #000;
+    box-shadow: var(--shadow);
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-h);
+  }
+
+  .hover-knobs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    align-items: center;
+    color: var(--text-dim);
+  }
+
+  .hover-knobs label {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+  }
+
+  .hover-readout input[type='number'] {
+    width: 4.6em;
+    margin: 0;
+    padding: 2px 4px;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  .hover-px {
+    margin: 4px 0 0;
+    color: var(--text-dim);
+  }
+
+  .hover-readout button.wire-line,
+  .hover-readout button.wire-link {
+    display: block;
+    width: 100%;
+    margin: 2px 0 0;
+    padding: 0;
+    min-height: 0;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 650;
+    color: var(--text-h);
+  }
+
+  .hover-readout button.wire-line.orange {
+    color: var(--orange);
+  }
+
+  .hover-readout button.wire-link {
+    width: auto;
+    color: var(--orange);
+    font-weight: 500;
+  }
+
   .preview-viewport.resizing {
     user-select: none;
   }
@@ -1560,7 +2264,7 @@
     border: 1px solid #000;
     overscroll-behavior: contain;
     touch-action: none;
-    cursor: grab;
+    cursor: default;
     user-select: none;
   }
 
@@ -1609,14 +2313,18 @@
     border-color: transparent;
   }
 
-  .order-path {
+  .order-path,
+  .center-mark {
     position: absolute;
     inset: 0;
     width: 100%;
     height: 100%;
     pointer-events: none;
-    color: rgba(245, 166, 35, 0.22);
     overflow: visible;
+  }
+
+  .order-path {
+    color: rgba(245, 166, 35, 0.22);
   }
 
   .cell {
