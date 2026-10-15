@@ -411,15 +411,19 @@ export function drawIngamePreview(
     shiftX: number
     shiftY: number
     pixelated: boolean
+    /** View zoom. The bitmap is painted at this size so zooming does not stretch a thumbnail. */
+    zoom?: number
     maxWidth?: number
     maxHeight?: number
   },
-): void {
+): { width: number; height: number } {
   const maxWidth = options.maxWidth ?? 256
   const maxHeight = options.maxHeight ?? 160
   const gameScale = Number.isFinite(options.gameScale) ? options.gameScale : 1
   const shiftX = Number.isFinite(options.shiftX) ? options.shiftX : 0
   const shiftY = Number.isFinite(options.shiftY) ? options.shiftY : 0
+  const requestedZoom = options.zoom
+  const zoom = Math.min(8, Math.max(0.05, requestedZoom != null && Number.isFinite(requestedZoom) ? requestedZoom : 1))
   const showSprite = cell !== null && cell.width > 0 && cell.height > 0 && gameScale > 0
 
   let i0 = -3
@@ -440,16 +444,19 @@ export function drawIngamePreview(
   const tilePx = Math.min(28, maxWidth / cols, maxHeight / rows)
   const cssW = cols * tilePx
   const cssH = rows * tilePx
-  const dpr = Math.min(2, globalThis.devicePixelRatio || 1)
+  const dpr = Math.min(3, Math.max(1, globalThis.devicePixelRatio || 1))
+  const paint = dpr * zoom
 
-  canvas.width = Math.max(1, Math.round(cssW * dpr))
-  canvas.height = Math.max(1, Math.round(cssH * dpr))
-  canvas.style.width = `${cssW}px`
-  canvas.style.height = `${cssH}px`
+  canvas.width = Math.max(1, Math.round(cssW * paint))
+  canvas.height = Math.max(1, Math.round(cssH * paint))
+  canvas.style.width = `${cssW * zoom}px`
+  canvas.style.height = `${cssH * zoom}px`
 
   const ctx = canvas.getContext('2d')
-  if (!ctx) return
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  if (!ctx) return { width: cssW, height: cssH }
+  ctx.setTransform(paint, 0, 0, paint, 0, 0)
+  ctx.imageSmoothingEnabled = !options.pixelated
+  ctx.imageSmoothingQuality = options.pixelated ? 'low' : 'high'
   ctx.clearRect(0, 0, cssW, cssH)
 
   const originX = (i0 - 0.5) * INGAME_TILE
@@ -484,6 +491,7 @@ export function drawIngamePreview(
     const worldW = cell.width * gameScale
     const worldH = cell.height * gameScale
     ctx.imageSmoothingEnabled = !options.pixelated
+    ctx.imageSmoothingQuality = options.pixelated ? 'low' : 'high'
     ctx.drawImage(cell, toX(shiftX - worldW / 2), toY(shiftY - worldH / 2), worldW * pxPerGame, worldH * pxPerGame)
   }
 
@@ -513,6 +521,8 @@ export function drawIngamePreview(
   ctx.moveTo(cx, cy - arm)
   ctx.lineTo(cx, cy + arm)
   ctx.stroke()
+
+  return { width: cssW, height: cssH }
 }
 
 export function formatLuaNumber(value: number): string {

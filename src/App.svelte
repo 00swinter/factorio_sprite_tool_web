@@ -39,6 +39,7 @@
     trimSize,
     type CenterBox,
   } from './lib/trim'
+  import HelpTip from './lib/HelpTip.svelte'
   import { zipBlobs } from './lib/zip'
 
   const ZOOM_MIN = 0.05
@@ -212,11 +213,11 @@
   })
   const worldFrameIndex = $derived(worldSprite ? previewSprites.indexOf(worldSprite) : -1)
   const worldCaption = $derived.by(() => {
-    if (!worldSprite) return 'Each square is one tile on the ground.'
+    if (!worldSprite) return ''
     const g = appliedScale > 0 ? appliedScale : 0
     const tilesWide = (layout.cellWidth * g) / 32
     const tilesTall = (layout.cellHeight * g) / 32
-    return `Frame ${worldFrameIndex} is ${formatLuaNumber(tilesWide)} × ${formatLuaNumber(tilesTall)} tiles. The orange square is where it is placed.`
+    return `Frame ${worldFrameIndex} · ${formatLuaNumber(tilesWide)} × ${formatLuaNumber(tilesTall)} tiles`
   })
   const lua = $derived(
     exportMode === 'split'
@@ -392,16 +393,17 @@
         previewOptions,
       )
     }
-    drawIngamePreview(canvas, cell, {
+    const logical = drawIngamePreview(canvas, cell, {
       gameScale: appliedScale,
       shiftX: pictureShift.x,
       shiftY: pictureShift.y,
       pixelated,
+      zoom: worldZoom,
     })
     const view = worldView
-    const cssW = canvas.clientWidth
-    const cssH = canvas.clientHeight
-    const key = `${cssW}x${cssH}`
+    const cssW = logical.width
+    const cssH = logical.height
+    const key = `${Math.round(cssW)}x${Math.round(cssH)}`
     if (view && cssW > 0 && cssH > 0 && key !== worldFittedKey) {
       worldFittedKey = key
       const z = untrack(() => worldZoom)
@@ -919,9 +921,6 @@
 />
 
 <div class="shell">
-  <p class="privacy" role="note">
-    Private by design. Everything runs locally in your browser — nothing is uploaded, shared, or transmitted.
-  </p>
   <header class="topbar">
     <div class="brand">
       <div class="mark" aria-hidden="true">
@@ -929,17 +928,25 @@
       </div>
       <div>
         <p class="eyebrow">Factorio graphics</p>
-        <h1>Sprite Assembler</h1>
+        <h1>
+          Sprite Assembler
+          <HelpTip label="About Sprite Assembler">
+            {#if exportMode === 'split'}
+              <p>
+                Import a full turret animation, keep every angle complete, and export as many sheets as needed under Factorio’s 8192px limit.
+              </p>
+            {:else}
+              <p>
+                Drop frames, set any column × row grid, and export a PNG Factorio can read as <code>line_length</code>.
+              </p>
+            {/if}
+            <p>
+              Private by design. Everything runs locally in your browser — nothing is uploaded, shared, or transmitted.
+            </p>
+          </HelpTip>
+        </h1>
       </div>
     </div>
-    <p class="lede">
-      {#if exportMode === 'split'}
-        Import a full turret animation, keep every angle complete, and export as many sheets as needed under Factorio’s 8192px limit.
-      {:else}
-        Drop frames, set any column × row grid, and export a PNG Factorio can read as
-        <code>line_length</code>.
-      {/if}
-    </p>
     <div class="top-actions">
       <button type="button" class="ghost" onclick={copyLua} disabled={sprites.length === 0 || (exportMode === 'split' && !canExportSplit)}>
         {copied ? 'Copied Lua' : 'Copy Lua'}
@@ -964,7 +971,15 @@
   <div class="workspace">
     <aside class="side">
       <section class="card">
-        <h2>Scale</h2>
+        <h2>
+          Scale
+          <HelpTip label="In-game scale">
+            <p>Each square is one tile on the ground. The orange square is where the sprite is placed.</p>
+            <p>
+              Factorio draws the sprite at this size. The hover coordinates, the trim shift, and the Lua all use this number, so the center stays on the placement point.
+            </p>
+          </HelpTip>
+        </h2>
         <div
           class="world-view"
           class:panning={worldPanning}
@@ -979,11 +994,13 @@
         >
           <canvas
             bind:this={worldCanvas}
-            style:transform="translate({worldPanX}px, {worldPanY}px) scale({worldZoom})"
+            style:transform="translate({worldPanX}px, {worldPanY}px)"
           ></canvas>
         </div>
         <div class="world-tools">
-          <p class="hint">{worldCaption}</p>
+          {#if worldCaption}
+            <p class="hint">{worldCaption}</p>
+          {/if}
           <label class="zoom">
             <span>{Math.round(worldZoom * 100)}%</span>
             <input
@@ -1001,13 +1018,21 @@
           <span>In-game scale</span>
           <input type="number" step="0.1" bind:value={gameScale} />
         </label>
-        <p class="hint">
-          Factorio draws the sprite at this size. The hover coordinates, the trim shift, and the Lua all use this number, so the center stays on the placement point.
-        </p>
       </section>
 
       <section class="card">
-        <h2>Layout</h2>
+        <h2>
+          Layout
+          <HelpTip label="About layout">
+            {#if exportMode === 'split'}
+              <p>
+                For turret shooting and other long directional animations. Each complete angle stays on one sheet; extra angles go to the next file.
+              </p>
+            {:else}
+              <p>Frames fill in filename order unless you drag them. Choose Z (row) or N (column) fill below.</p>
+            {/if}
+          </HelpTip>
+        </h2>
         <div class="presets">
           <button type="button" class:active={exportMode === 'single'} onclick={() => setExportMode('single')}>
             Single sheet
@@ -1018,11 +1043,21 @@
         </div>
 
         {#if exportMode === 'split'}
-          <p class="hint">
-            For turret shooting and other long directional animations. Each complete angle stays on one sheet; extra angles go to the next file.
-          </p>
-
-          <span class="field-label">Each complete animation is</span>
+          <span class="field-label">
+            Each complete animation is
+            <HelpTip label="Animation axis">
+              {#if splitAxis === 'row'}
+                <p>
+                  Columns are animation frames. Rows are turret angles. This matches Factorio <code>stripes</code> and gun-turret shooting sheets.
+                </p>
+              {:else}
+                <p>Frames go top to bottom, and the next angle is the next column.</p>
+                <p>
+                  Factorio still reads left-to-right first. Use rows as complete angles unless you specifically want vertical animations.
+                </p>
+              {/if}
+            </HelpTip>
+          </span>
           <div class="presets">
             <button
               type="button"
@@ -1041,38 +1076,40 @@
               A column (one angle)
             </button>
           </div>
-          {#if splitAxis === 'row'}
-            <p class="hint">
-              Columns are animation frames. Rows are turret angles. This matches Factorio <code>stripes</code> and gun-turret shooting sheets.
-            </p>
-          {:else}
-            <p class="note">
-              Factorio still reads left-to-right first. Use rows as complete angles unless you specifically want vertical animations.
-            </p>
-          {/if}
 
-          <label class="field">
-            <span>Animation length (frames)</span>
-            <input type="number" min="1" max="512" bind:value={animationLength} />
-          </label>
-          <p class="hint">
-            {splitAxis === 'row' ? 'This is the column count on every sheet.' : 'This is the row count on every sheet.'}
-            An angle is never split across files.
-          </p>
+          <div class="field">
+            <span class="label-row">
+              <label for="animation-length">Animation length (frames)</label>
+              <HelpTip label="Animation length">
+                <p>
+                  {splitAxis === 'row' ? 'This is the column count on every sheet.' : 'This is the row count on every sheet.'}
+                  An angle is never split across files.
+                </p>
+              </HelpTip>
+            </span>
+            <input id="animation-length" type="number" min="1" max="512" bind:value={animationLength} />
+          </div>
 
           <label class="check">
             <input type="checkbox" bind:checked={splitAutoPack} />
-            Pack as many complete angles as fit under 8192px
+            <span class="check-label">Pack as many complete angles as fit under 8192px</span>
           </label>
           {#if !splitAutoPack}
-            <label class="field">
-              <span>Angles per sheet</span>
-              <input type="number" min="1" max="512" bind:value={splitGroups} />
-            </label>
-            <p class="hint">
-              Capped at {splitPlan.maxGroupsThatFit || 0} so the sheet stays within 8192px
-              ({splitPlan.cellWidth}×{splitPlan.cellHeight} cells).
-            </p>
+            <div class="field">
+              <span class="label-row">
+                <label for="angles-per-sheet">Angles per sheet</label>
+                <HelpTip label="Angles per sheet">
+                  <p>
+                    Capped at {splitPlan.maxGroupsThatFit || 0} so the sheet stays within 8192px
+                    ({splitPlan.cellWidth}×{splitPlan.cellHeight} cells).
+                  </p>
+                </HelpTip>
+              </span>
+              <span class="input-row">
+                <input id="angles-per-sheet" type="number" min="1" max="512" bind:value={splitGroups} />
+                <span class="affix">max {splitPlan.maxGroupsThatFit || 0}</span>
+              </span>
+            </div>
           {/if}
 
           <dl class="stats">
@@ -1135,12 +1172,19 @@
             <p class="note">Frame sizes differ. Smaller ones are aligned inside the largest cell.</p>
           {/if}
         {:else}
-          <p class="hint">Frames fill in filename order unless you drag them. Choose Z (row) or N (column) fill below.</p>
-
-          <label class="check">
-            <input type="checkbox" bind:checked={customGrid} />
-            Set columns and rows individually
-          </label>
+          <div class="check">
+            <input id="custom-grid" type="checkbox" bind:checked={customGrid} />
+            <span class="check-label">
+              <label for="custom-grid">Set columns and rows individually</label>
+              <HelpTip label="Columns and rows">
+                {#if customGrid}
+                  <p>Factorio <code>line_length</code> is the column count. Extra cells stay empty and transparent.</p>
+                {:else}
+                  <p>Auto compact: columns and rows are chosen so the sheet stays close to square.</p>
+                {/if}
+              </HelpTip>
+            </span>
+          </div>
 
           <div class="ratio">
             <label class="field">
@@ -1153,22 +1197,20 @@
               <input type="number" min="1" max="512" bind:value={rows} disabled={!customGrid} />
             </label>
           </div>
-          {#if customGrid}
-            <p class="hint">Factorio <code>line_length</code> is the column count. Extra cells stay empty and transparent.</p>
-          {:else}
-            <p class="hint">Auto compact: columns and rows are chosen so the sheet stays close to square.</p>
-          {/if}
 
-          <label class="field">
-            <span>Fill order</span>
-            <select bind:value={fillOrder}>
+          <div class="field">
+            <span class="label-row">
+              <label for="fill-order">Fill order</label>
+              <HelpTip label="Fill order">
+                <p>Row-major (Z) writes left to right, then down. Column-major (N) writes top to bottom, then right.</p>
+                <p>Factorio still reads files left-to-right first. Use row-major unless you need N-order packing.</p>
+              </HelpTip>
+            </span>
+            <select id="fill-order" bind:value={fillOrder}>
               <option value="row">Row-major (Z) — left to right, then down</option>
               <option value="column">Column-major (N) — top to bottom, then right</option>
             </select>
-          </label>
-          {#if fillOrder === 'column'}
-            <p class="note">Factorio still reads files left-to-right first. Use row-major unless you need N-order packing.</p>
-          {/if}
+          </div>
 
           <dl class="stats">
             <div>
@@ -1256,7 +1298,17 @@
       </section>
 
       <section class="card">
-        <h2>Tight crop</h2>
+        <h2>
+          Tight crop
+          <HelpTip label="Tight crop">
+            <p>
+              Optional. Cuts one shared window out of every frame, locked to the building center, so the frames stay lined up. The Lua shift puts that center back on the entity. Set the cell to Auto and the sheet shrinks to that window.
+            </p>
+            <p>
+              Crop the pole and the shadow as two separate sets if each picture should shrink to its own pixels. Each shift still meets at the building center. Load them together only when they share one sheet.
+            </p>
+          </HelpTip>
+        </h2>
         <label class="check">
           <input
             type="checkbox"
@@ -1265,30 +1317,40 @@
           />
           Trim empty space
         </label>
-        <p class="hint">
-          Optional. Cuts one shared window out of every frame, locked to the building center, so the frames stay lined up. The Lua shift puts that center back on the entity. Set the cell to Auto and the sheet shrinks to that window.
-        </p>
         {#if trimEnabled}
           <div class="row">
-            <label class="field">
-              <span>Empty alpha</span>
-              <input type="number" min="0" max="255" bind:value={trimAlpha} />
-            </label>
-            <label class="field">
-              <span>Margin</span>
-              <input type="number" min="0" max="512" bind:value={trimMargin} />
-            </label>
+            <div class="field">
+              <span class="label-row">
+                <label for="trim-alpha">Empty alpha</label>
+                <HelpTip label="Empty alpha">
+                  <p>Pixels at or below this alpha count as empty.</p>
+                </HelpTip>
+              </span>
+              <input id="trim-alpha" type="number" min="0" max="255" bind:value={trimAlpha} />
+            </div>
+            <div class="field">
+              <span class="label-row">
+                <label for="trim-margin">Margin</label>
+                <HelpTip label="Margin">
+                  <p>Keeps a ring of pixels around the art.</p>
+                </HelpTip>
+              </span>
+              <input id="trim-margin" type="number" min="0" max="512" bind:value={trimMargin} />
+            </div>
           </div>
-          <p class="hint">Pixels at or below that alpha count as empty. Margin keeps a ring of pixels around the art.</p>
 
           {#if exportMode === 'single'}
-            <label class="check">
-              <input type="checkbox" bind:checked={asDirections} />
-              Frames are directions
-            </label>
-            <p class="hint">
-              For a pole strip. Emits <code>direction_count</code> and <code>line_length</code> instead of <code>frame_count</code>. Keep row-major fill so the first frame is the left one.
-            </p>
+            <div class="check">
+              <input id="frame-directions" type="checkbox" bind:checked={asDirections} />
+              <span class="check-label">
+                <label for="frame-directions">Frames are directions</label>
+                <HelpTip label="Frames are directions">
+                  <p>
+                    For a pole strip. Emits <code>direction_count</code> and <code>line_length</code> instead of <code>frame_count</code>. Keep row-major fill so the first frame is the left one.
+                  </p>
+                </HelpTip>
+              </span>
+            </div>
           {/if}
           <label class="check">
             <input type="checkbox" bind:checked={drawAsShadow} />
@@ -1314,9 +1376,6 @@
             </div>
           </dl>
 
-          <p class="hint">
-            Crop the pole and the shadow as two separate sets if each picture should shrink to its own pixels. Each shift still meets at the building center. Load them together only when they share one sheet.
-          </p>
           {#if sprites.length > 0 && measuredReady && !contentTrim}
             <p class="warn">Every frame is fully transparent, so there is nothing to trim.</p>
           {/if}
@@ -1333,17 +1392,21 @@
       </section>
 
       <section class="card">
-        <h2>Export</h2>
+        <h2>
+          Export
+          {#if exportMode === 'split'}
+            <HelpTip label="Split export">
+              <p>
+                Downloads one ZIP with {splitPlan.sheetCount || 0} PNG{splitPlan.sheetCount === 1 ? '' : 's'}
+                named like <code>{activeSheet?.filename ?? 'spritesheet-1.png'}</code> plus the Lua <code>stripes</code> snippet.
+              </p>
+            </HelpTip>
+          {/if}
+        </h2>
         <label class="field">
           <span>Filename</span>
           <input type="text" bind:value={filename} />
         </label>
-        {#if exportMode === 'split'}
-          <p class="hint">
-            Downloads one ZIP with {splitPlan.sheetCount || 0} PNG{splitPlan.sheetCount === 1 ? '' : 's'}
-            named like <code>{activeSheet?.filename ?? 'spritesheet-1.png'}</code> plus the Lua <code>stripes</code> snippet.
-          </p>
-        {/if}
         <pre class="lua">{lua}</pre>
       </section>
     </aside>
@@ -1424,11 +1487,17 @@
 
         <div class="preview-viewport" class:resizing={resizingPreview} style:height="{previewHeight}px">
           {#if sprites.length === 0}
-            <button type="button" class="empty" onclick={() => fileInput?.click()}>
-              <strong>Drop sprites here</strong>
-              <span>or click to choose image files</span>
-              <span class="empty-note">They will be sorted by filename, so frame_1, frame_2, frame_10 stay in order.</span>
-            </button>
+            <div class="empty">
+              <button type="button" onclick={() => fileInput?.click()}>
+                <strong>Drop sprites here</strong>
+                <span>or click to choose image files</span>
+              </button>
+              <div class="empty-help">
+                <HelpTip label="Import order">
+                  <p>They will be sorted by filename, so frame_1, frame_2, frame_10 stay in order.</p>
+                </HelpTip>
+              </div>
+            </div>
           {:else}
             <div class="hover-readout">
               <div class="hover-knobs">
@@ -1614,7 +1683,23 @@
 
       <section class="frames card">
         <div class="preview-bar">
-          <h2>Frames</h2>
+          <h2>
+            Frames
+            <HelpTip label="Frames">
+              {#if sprites.length === 0}
+                {#if exportMode === 'split'}
+                  <p>Drop the full animation — every angle, every frame — in filename order.</p>
+                {:else}
+                  <p>Drop a sequence and it will assemble as {layout.columns} × {layout.rows}.</p>
+                {/if}
+              {:else}
+                <p>Ctrl-click to add frames. Shift-click to select a range. Delete removes the selection. Drag a frame to reorder.</p>
+                {#if exportMode === 'split' && activeSheet}
+                  <p>Highlighted frames are on sheet {previewSheet + 1}. Dimmed frames are on the other sheets.</p>
+                {/if}
+              {/if}
+            </HelpTip>
+          </h2>
           <div class="preview-tools">
             <label class="zoom">
               <span>{Math.round(frameZoom * 100)}%</span>
@@ -1652,20 +1737,8 @@
         />
 
         {#if sprites.length === 0}
-          <p class="hint">
-            {#if exportMode === 'split'}
-              No frames yet. Drop the full animation (every angle, every frame, filename order).
-            {:else}
-              No frames yet. Drop a sequence and they will assemble as {layout.columns} × {layout.rows}.
-            {/if}
-          </p>
+          <p class="hint">No frames yet.</p>
         {:else}
-          <p class="hint">
-            Ctrl-click to add frames. Shift-click to select a range. Delete removes the selection.
-            {#if exportMode === 'split' && activeSheet}
-              Highlighted frames are on sheet {previewSheet + 1}.
-            {/if}
-          </p>
           <ol
             class="strip"
             class:split-strip={exportMode === 'split'}
@@ -1720,22 +1793,13 @@
     padding: 24px 20px 40px;
   }
 
-  .privacy {
-    margin: 0 0 16px;
-    padding: 9px 14px;
-    background: rgba(143, 191, 90, 0.12);
-    border: 1px solid rgba(143, 191, 90, 0.38);
-    color: var(--green);
-    font-size: 13px;
-    letter-spacing: 0.02em;
-  }
-
   .topbar {
-    display: grid;
-    grid-template-columns: auto 1fr auto;
-    gap: 24px;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 16px 24px;
     align-items: center;
-    margin-bottom: 22px;
+    margin-bottom: 18px;
   }
 
   .brand {
@@ -1781,6 +1845,9 @@
   }
 
   h1 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     font-size: 28px;
     letter-spacing: -0.04em;
     line-height: 1.1;
@@ -1793,16 +1860,16 @@
     color: var(--orange);
   }
 
-  .lede {
-    margin: 0;
-    color: var(--text-dim);
-    max-width: 52ch;
+  .side h2,
+  .frames h2 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
-  .lede code {
-    color: var(--orange);
-    font-family: var(--mono);
-    font-size: 0.92em;
+  .side h2 {
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--line);
   }
 
   .top-actions,
@@ -1863,7 +1930,13 @@
   }
 
   .world-tools .hint {
-    margin: 8px 0 0;
+    margin: 0;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .world-tools .zoom {
+    margin-left: auto;
   }
 
   .world-tools .zoom input {
@@ -1909,14 +1982,52 @@
     color: var(--text-dim);
   }
 
+  .field-label,
+  .label-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
   .field-label {
-    display: block;
     margin-top: 14px;
     margin-bottom: 6px;
     font-size: 12px;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     color: var(--text-dim);
+  }
+
+  .input-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .input-row input {
+    width: auto;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .affix {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+
+  .check-label {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .field label,
+  .check-label label {
+    cursor: pointer;
   }
 
   .sheet-nav {
@@ -1950,12 +2061,6 @@
     font-weight: 700;
     line-height: 1;
     padding-bottom: 8px;
-  }
-
-  .hint code {
-    color: var(--orange);
-    font-family: var(--mono);
-    font-size: 0.92em;
   }
 
   input,
@@ -2106,10 +2211,16 @@
 
   .preview-bar {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
-    gap: 12px;
+    gap: 8px 12px;
     align-items: center;
     margin-bottom: 12px;
+  }
+
+  .frames .preview-tools {
+    flex: 1 1 100%;
+    justify-content: flex-start;
   }
 
   .zoom {
@@ -2122,12 +2233,20 @@
   }
 
   .empty {
+    position: relative;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .empty button {
     display: grid;
     place-content: center;
     text-align: center;
     gap: 6px;
+    width: 100%;
     height: 100%;
     min-height: 0;
+    padding: 16px;
     border: 1px dashed var(--line);
     background:
       linear-gradient(45deg, #1f1e1a 25%, transparent 25%) 0 0 / 18px 18px,
@@ -2135,13 +2254,9 @@
       linear-gradient(45deg, transparent 75%, #1f1e1a 75%) 9px -9px / 18px 18px,
       linear-gradient(-45deg, transparent 75%, #1f1e1a 75%) -9px 0 / 18px 18px,
       var(--slot);
-    cursor: pointer;
-  }
-
-  .empty {
-    width: 100%;
     color: inherit;
     box-shadow: none;
+    cursor: pointer;
   }
 
   .empty strong {
@@ -2149,11 +2264,11 @@
     font-size: 20px;
   }
 
-  .empty-note {
-    color: var(--text-dim);
-    font-size: 13px;
-    max-width: 42ch;
-    margin: 8px auto 0;
+  .empty-help {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 2;
   }
 
   .preview-viewport {
@@ -2444,7 +2559,6 @@
   }
 
   @media (max-width: 980px) {
-    .topbar,
     .workspace {
       grid-template-columns: 1fr;
     }
